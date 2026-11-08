@@ -2,7 +2,7 @@ import { jsonTool } from './helpers.js'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { renderJson } from './helpers.js'
+import { renderJson, sessionIdOf, toolSource } from './helpers.js'
 import { sleep } from '../util/errors.js'
 
 /** Register client-window, navigation and screenshot tools. */
@@ -31,7 +31,10 @@ export function registerClientTools(ctx, deps) {
           return client.clientRoutes({ signal: exec.signal })
         case 'window':
           if (!args.windowAction) throw new Error('windowAction is required for action=window')
-          return client.clientWindow(args.windowAction, { signal: exec.signal })
+          return safety.raw({
+            sessionId: sessionIdOf(exec), source: toolSource('client_control', exec), method: 'POST',
+            path: '/client/window', body: { action: args.windowAction }, signal: exec.signal,
+          })
         case 'navigate': {
           if (!args.path) throw new Error('path is required for action=navigate')
           const routes = await client.clientRoutes({ signal: exec.signal }).catch(() => null)
@@ -42,7 +45,10 @@ export function registerClientTools(ctx, deps) {
               throw new Error(`unknown client route "${args.path}"; available: ${routes.map((route) => route.path).join(', ')}`)
             }
           }
-          return client.clientNavigate(args.path, args.show !== false, { signal: exec.signal })
+          return safety.raw({
+            sessionId: sessionIdOf(exec), source: toolSource('client_control', exec), method: 'POST',
+            path: '/client/navigate', body: { path: args.path, show: args.show !== false }, signal: exec.signal,
+          })
         }
         default:
           throw new Error(`unknown action: ${args.action}`)

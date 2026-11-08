@@ -15,6 +15,9 @@ import { registerEventTools } from './src/tools/events.js'
 import { registerApiTools } from './src/tools/api.js'
 import { createPanelHandler } from './src/client-rpc.js'
 import { SKILL } from './src/skill.js'
+import { SettingsStore } from './src/settings.js'
+import { resolvePercent, limitFor } from './src/safety/scale.js'
+import { sleep } from './src/util/errors.js'
 
 export const name = 'undersilicon'
 export const inject = ['tools']
@@ -37,9 +40,9 @@ export const Config = z.object({
     maxLogs: z.number().min(50).max(5000).step(50).default(500),
   }).default({}),
   events: z.object({
-    maxSubscriptions: z.number().min(1).max(64).step(1).default(16),
-    minThrottleMs: z.number().min(100).max(60000).step(100).default(200),
-    defaultThrottleMs: z.number().min(200).max(60000).step(100).default(1000),
+    maxSubscriptions: z.number().min(1).max(64).step(1).default(20),
+    minThrottleMs: z.number().min(500).max(3600000).step(100).default(500),
+    defaultThrottleMs: z.number().min(500).max(3600000).step(100).default(1000),
     maxEvents: z.number().min(1).max(1000).step(1).default(30),
   }).default({}),
 })
@@ -60,11 +63,23 @@ function makeLogger(ctx) {
 export function apply(ctx, config = {}) {
   const resolved = Config(config ?? {})
   const log = makeLogger(ctx)
-  const client = new ControlPanelClient({ baseUrl: resolved.baseUrl })
-  const audit = new AuditLog({ enabled: resolved.auditEnabled })
-  const watchdog = new Watchdog({ client, ttlSeconds: resolved.watchdogTtlSec, log })
-  const safety = new SafetyLayer({ client, config: resolved, audit, watchdog, log })
-  const events = new EventManager({ client, config: resolved, audit, log })
+  const settings = new SettingsStore({ config: resolved, log })
+  const runtimeConfig = {}
+  Object.assign(runtimeConfig, settings.applyTo())
+  settings.config = runtimeConfig
+  const applySettings = () => {
+    Object.assign(runtimeConfig, settings.applyTo())
+    settings.config = runtimeConfig
+    watchdog.setTtl(runtimeConfig.watchdogTtlSec)
+    safety.config = runtimeConfig
+    events.config = runtimeConfig
+    scripts.config = runtimeConfig
+  }
+  const client = new ControlPanelClient({ baseUrl: runtimeConfig.baseUrl })
+  const audit = new AuditLog({ enabled: runtimeConfig.auditEnabled })
+  const watchdog = new Watchdog({ client, ttlSeconds: runtimeConfig.watchdogTtlSec, log })
+  const safety = new SafetyLayer({ client, config: runtimeConfig, audit, watchdog, log })
+  const events = new EventManager({ client, config: runtimeConfig, audit, log })
   let scripts
   const notifyAgent = async (agent, text, wake, script) => {
     const message = {
@@ -81,13 +96,15 @@ export function apply(ctx, config = {}) {
     watchdog.stop(sessionId)
     return result
   }
-  const statusProvider = async () => {
-    const [mode, devices, clientState, game, runtime] = await Promise.all([
+  const statusProvider = async ({ panel = false } = {}) => {
+    if (panel) events.keepPanelAlive()
+    const [mode, devices, clientState, game, runtime, ranges] = await Promise.all([
       safety.getMode().catch(() => 'unknown'),
       client.devices().catch(() => []),
       client.clientState().catch((error) => ({ available: false, error: error.message })),
       client.gameStatus().catch(() => null),
       client.gameRuntimeStatus().catch(() => null),
+      safety.getRanges().catch(() => ({})),
     ])
     return {
       mode,
@@ -97,6 +114,7 @@ export function apply(ctx, config = {}) {
         id: device.id, name: device.nickname || device.name, type: device.type,
         connected: device.connected, controlConnection: device.controlConnection,
         data: pickPanelData(device.data),
+        bars: panelBars(device.data, ranges, runtimeConfig.limits),
       })),
       client: clientState,
       game: { status: game, runtime },
@@ -104,16 +122,19 @@ export function apply(ctx, config = {}) {
       subscriptions: events.list(),
       watchdog: watchdog.status(),
       stream: events.state,
-      thresholds: resolved.limits,
+      emergency: safety.emergencyState(),
+      thresholds: runtimeConfig.limits,
+      availableCapabilities: Object.keys(ranges || {}),
+      settings: settings.snapshot(),
       audit: audit.recent(12),
     }
   }
   scripts = new ScriptManager({
-    client, safety, events, audit, config: resolved, log,
+    client, safety, events, audit, config: runtimeConfig, log,
     notifyAgent, emergencyStop: stopDevices, statusProvider,
   })
   const deps = {
-    client, safety, watchdog, scripts, events, audit, config: resolved, log,
+    client, safety, watchdog, scripts, events, audit, config: runtimeConfig, log,
     getAttachments: () => ctx.get('attachments'),
     canUseImage: (exec) => canUseImage(ctx, exec),
   }
@@ -136,19 +157,37 @@ export function apply(ctx, config = {}) {
   // authenticated `/api` Fetch route instead.
   ctx.inject(['connection'], (scoped) => {
     const handler = createPanelHandler({
-      status: statusProvider,
+      status: () => statusProvider({ panel: true }),
       audit,
       scripts,
       events,
       emergencyStop: async (payload) => {
+        const reason = payload?.reason || 'panel emergency stop'
+        safety.halt({ reason, latch: true })
         const stopped = scripts.stopAll('panel-emergency-stop', undefined, { explicit: false })
         events.dispose()
-        const result = await stopDevices({
+        watchdog.stop(payload?.sessionId || 'panel')
+        const result = await safety.emergencyStop({
           sessionId: payload?.sessionId || 'panel', source: { kind: 'panel', name: 'emergency_stop' },
-          reason: payload?.reason || 'panel emergency stop',
+          reason, signal: AbortSignal.timeout(30000), skipHalt: true,
         })
-        return { ...result, stoppedScripts: stopped }
+        return { ...result, stoppedScripts: stopped, latch: safety.emergencyState() }
       },
+      emergencyResume: async (payload) => safety.resume({
+        sessionId: payload?.sessionId || 'panel',
+        source: { kind: 'panel', name: 'emergency_resume' },
+      }),
+      updateSettings: async (patch) => {
+        const before = settings.snapshot()
+        const snapshot = await settings.update(patch)
+        applySettings()
+        audit.record({
+          sessionId: 'panel', source: { kind: 'panel', name: 'settings' }, action: 'settings.update',
+          request: { patch, before: before.overrides }, result: { ok: true, settings: snapshot },
+        })
+        return snapshot
+      },
+      getSettings: async () => settings.snapshot(),
     })
     const dispose = scoped.connection.fetch.register({
       path: '/api/undersilicon',
@@ -177,21 +216,28 @@ export function apply(ctx, config = {}) {
     events.unsubscribeOwner(sessionId)
     audit.record({
       sessionId, source: { kind: 'system', name: 'session-end' }, action: 'session.end',
-      result: { ok: true, stopOnSessionEnd: resolved.stopOnSessionEnd },
+      result: { ok: true, stopOnSessionEnd: runtimeConfig.stopOnSessionEnd },
     })
-    if (resolved.stopOnSessionEnd) {
+    if (runtimeConfig.stopOnSessionEnd) {
       void stopDevices({
         sessionId, source: { kind: 'system', name: 'session-end' }, reason: 'session-end stopOnSessionEnd',
       }).catch((error) => log('session-end stop failed', { error: error.message }))
     }
   })
 
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
     scripts.dispose()
     events.dispose()
+    if (runtimeConfig.stopOnSessionEnd) {
+      const stop = safety.emergencyStop({
+        sessionId: 'plugin-dispose', source: { kind: 'system', name: 'plugin-dispose' },
+        reason: 'plugin-dispose stopOnSessionEnd', signal: AbortSignal.timeout(3000),
+      }).catch((error) => log('dispose stop failed', { error: error.message }))
+      await Promise.race([stop, sleep(3000)])
+    }
     watchdog.dispose()
     audit.record({ source: { kind: 'system', name: 'plugin-dispose' }, action: 'plugin.dispose', result: { ok: true } })
-    void audit.flush()
+    await audit.flush()
   })
 
   // Restore persisted scripts after the plugin is active.
@@ -221,4 +267,29 @@ function pickPanelData(data) {
   const out = {}
   for (const key of keys) if (data[key] !== undefined) out[key] = data[key]
   return out
+}
+
+/** Intensity bars with the reachable threshold, used by the panel. */
+function panelBars(data, ranges, limits) {
+  if (!data || typeof data !== 'object') return []
+  const specs = [
+    ['power', 'strength', 'set', 'value'],
+    ['voltage', 'shock', 'start', 'voltage'],
+    ['vibration', 'vibration', 'set', 'value'],
+    ['suction', 'suction', 'set', 'value'],
+  ]
+  const bars = []
+  for (const [key, capability, action, field] of specs) {
+    const value = Number(data[key])
+    if (!Number.isFinite(value)) continue
+    const range = ranges?.[capability]?.[action]?.[field]
+    if (!range) continue
+    const percent = resolvePercent(limits, capability, action, field)
+    bars.push({
+      key, label: key, value, min: range.min, max: range.max,
+      limit: Math.floor(limitFor(range, percent)), percent,
+      ...(range.unit ? { unit: range.unit } : {}),
+    })
+  }
+  return bars
 }

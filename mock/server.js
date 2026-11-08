@@ -69,16 +69,23 @@ export function createMockServer({ mode = 'local', clientAvailable = true } = {}
     }
     if (path === '/api/device-capabilities' && req.method === 'GET') {
       return json(200, {
-        capabilities: ['strength', 'shock', 'vibration', 'suction', 'motors', 'reporting', 'distance'],
+        capabilities: ['strength', 'shock', 'vibration', 'suction', 'motors', 'reporting', 'distance', 'pump'],
         capabilityConfig: {
           strength: { actionParams: { set: { value: { type: 'number', min: 0, max: 200, default: 0 } } } },
           shock: { actionParams: { start: { voltage: { type: 'number', min: 0, max: 100, default: 24 } } } },
           motors: { actionParams: { set: { channels: { type: 'object' } } } },
+          pump: { actionParams: { start: { rate: { type: 'number', min: 0, max: 255 }, ss: { type: 'number', min: 0, max: 255, default: 60 } } } },
           reporting: { actionParams: { setReportDelay: { ms: { type: 'number', min: 0, max: 99999 } } } },
         },
-        typeCapabilityMap: { PJ01: ['strength'], DIANJI: ['shock'], HR01: [], REMOTE01: ['strength'] },
+        typeCapabilityMap: { PJ01: ['strength'], DIANJI: ['shock'], CUNZHI01: ['strength', 'shock'], YCY_ENEMA: ['pump'], HR01: [], REMOTE01: ['strength'] },
       })
     }
+    if (path === '/api/test/start' && req.method === 'POST') return json(200, { success: true })
+    if (path.startsWith('/api/test/device/') && path.endsWith('/start') && req.method === 'POST') return json(200, { success: true })
+    if (path === '/api/remote-projection/create' && req.method === 'POST') return json(200, { ok: true })
+    if (path === '/api/remote-game/command' && req.method === 'POST') return json(200, { ok: true })
+    if (path === '/api/virtual-devices/batch' && req.method === 'POST') return json(200, { ok: true })
+    if (path === '/api/virtual-devices/emit' && req.method === 'POST') return json(200, { ok: true })
     if (path === '/api/device-watchdog/heartbeat' && req.method === 'POST') {
       if (remote) return error(423, 'REMOTE_LOCKED', '远程控制中不可用')
       if (!body.clientId) return error(400, 'INVALID_CLIENT_ID', 'clientId required')
@@ -114,12 +121,31 @@ export function createMockServer({ mode = 'local', clientAvailable = true } = {}
       return json(200, typeConfig(type))
     }
     if (path === '/api/games' && req.method === 'GET') {
-      return json(200, [{ id: 'demo', name: '演示玩法', title: '演示玩法', description: 'mock', howTo: 'start', devices: [{ key: 'main', name: '主设备' }], params: [{ key: 'speed', name: '速度', min: 0, max: 10 }] }])
+      return json(200, [{
+        id: 'demo', name: '演示玩法', title: '演示玩法', description: 'mock', howTo: 'start',
+        devices: [{ id: 'motor', name: '主设备', capabilities: ['strength'] }],
+        params: [
+          { key: 'speed', name: '速度', min: 0, max: 10 },
+          { key: 'maxMotorIntensity', name: '最大强度', min: 1, max: 255, device: 'motor' },
+          { key: 'shockVoltage', name: '电击强度', min: 1, max: 50, device: 'punish' },
+        ],
+      }])
     }
     if (path === '/api/games/status') return json(200, { running: !!state.game, gameId: state.game?.id || null, source: state.game?.source || null, snapshot: state.game?.snapshot || null })
     if (path === '/api/games/stop-current' && req.method === 'POST') { state.game = null; return json(200, { ok: true }) }
     if (path === '/api/games/demo/start' && req.method === 'POST') { state.game = { id: 'demo', source: 'local' }; return json(200, { ok: true, gamePath: '/games/demo' }) }
-    if (path === '/api/game-runtime/games') return json(200, [])
+    if (path === '/api/game-runtime/games') return json(200, [{
+      id: 'host-demo', title: '宿主演示', runtimeMode: 'host',
+      devices: [
+        { id: 'motor', capabilities: ['strength'] },
+        { id: 'punish', capabilities: ['shock'] },
+      ],
+      params: [
+        { key: 'maxMotorIntensity', type: 'number', min: 1, max: 255, device: 'motor' },
+        { key: 'shockVoltage', type: 'number', min: 1, max: 50, device: 'punish' },
+        { key: 'duration', type: 'number', min: 1, max: 180 },
+      ],
+    }])
     if (path === '/api/game-runtime/status') return json(200, { running: !!state.game?.runtime, gameId: state.game?.id || null, mode: 'host' })
     if (path === '/api/game-runtime/params') return json(200, { ok: true, params: body.params })
     if (path === '/api/game-runtime/action') return json(200, { ok: true, action: body.action, payload: body.payload })
@@ -214,6 +240,18 @@ function devices() {
       data: { shock: 0, voltage: 0 },
     },
     {
+      id: 'cz-1', name: '寸止设备', nickname: null, type: 'CUNZHI01', connected: true,
+      connectionType: 'mqtt', controlConnection: 'mqtt',
+      connections: [{ type: 'mqtt' }], lastReport: new Date().toISOString(),
+      data: { power: 0, voltage: 0, shock: 0 },
+    },
+    {
+      id: 'enema-1', name: '灌肠设备', nickname: null, type: 'YCY_ENEMA', connected: true,
+      connectionType: 'mqtt', controlConnection: 'mqtt',
+      connections: [{ type: 'mqtt' }], lastReport: new Date().toISOString(),
+      data: { rate: 0 },
+    },
+    {
       id: 'hr-1', name: '心率带', nickname: null, type: 'HR01', connected: true,
       connectionType: 'mock', controlConnection: 'mqtt',
       connections: [{ type: 'mqtt' }], lastReport: new Date().toISOString(),
@@ -240,6 +278,21 @@ function typeConfig(type) {
     ],
   }
   if (type === 'HR01') return { ...base, capabilities: [], operations: [] }
+  if (type === 'CUNZHI01') return {
+    ...base, capabilities: ['strength', 'shock', 'reporting'],
+    operations: [
+      { key: 'start', name: '启动' },
+      { key: 'stop', name: '停止' },
+    ],
+  }
+  if (type === 'YCY_ENEMA') return {
+    ...base, capabilities: ['pump'],
+    operations: [
+      { key: 'pumpStart', name: '启动泵' },
+      { key: 'pumpStop', name: '停止泵' },
+      { key: 'trigger', name: '触发指令' },
+    ],
+  }
   return {
     ...base, capabilities: ['strength'], operations: [
       { key: 'start', name: '启动', capability: 'strength', action: 'set', input: { value: 255 } },

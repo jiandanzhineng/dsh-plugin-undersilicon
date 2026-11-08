@@ -24,8 +24,9 @@ parameter ranges and the effective percentage limit of each capability.
 Every numeric control input is clamped to \`min + (max - min) * percent / 100\`.
 The default is 60% (\`shock\` defaults to 30% in the shipped config). A clamped
 result returns \`clamped: [{field, requested, applied, min, max, limit, percent}]\`.
-**Never retry with a higher value to bypass a clamp.** Tell the user what was
-applied and that the threshold is configurable in the plugin settings.
+Integer caps are floored. **Never retry with a higher value to bypass a clamp.**
+The user edits thresholds in the sidebar panel's Settings section; the agent
+has no settings tool.
 
 Common capability actions:
 
@@ -60,16 +61,21 @@ user names a device preset ("启动/停止/加锁"), otherwise use capability+ac
 
 \`game_list\` → \`game_status\` → \`game_start { gameId, deviceMapping, parameters }\`.
 Launch goes through the client UI, so iframe games load correctly. Only one game
-runs at a time. \`game_control action=params\` changes HostRuntime parameters;
+runs at a time. Intensity parameters declared by the game manifest (for example
+\`maxMotorIntensity\`, \`shockVoltage\`, \`midIntensityMax\`) are scaled with the
+matching capability threshold before launch; the result reports \`scaledFields\`
+and \`clamped\`. Unknown intensity-looking parameters are refused.
+\`game_control action=params\` changes HostRuntime parameters (scaled the same way);
 \`action=action actionName=pause|resume\` sends a game action; stop uses both game
 controllers. \`game_start\` fails with 503 when the desktop client bridge is absent.
 
 ## Scripts (automation)
 
-\`script_run\` executes JavaScript in a worker+vm sandbox. Only \`us\`, \`console\`,
-standard JS built-ins and bridge-backed timers exist — there is no require,
-process, filesystem or network. Every \`us.*\` call goes through the same safety
-layer and audit log as tools.
+\`script_run\` executes JavaScript in a separate child process with one vm
+context per script. The child runs under Node's permission model: no filesystem
+writes, no child processes, no workers, and read access only to the sandbox
+itself. Only \`us\`, \`console\`, standard JS built-ins and bridge-backed timers
+exist. Every \`us.*\` call goes through the same safety layer and audit log as tools.
 
 \`\`\`js
 const devs = await us.devices({ connected: true });
@@ -91,8 +97,8 @@ API: \`us.devices(filter?)\`, \`us.device(id)\`, \`us.control(id,cap,action,inpu
 
 A script with no timers/listeners ends after its top-level code. Otherwise it
 stays alive until \`us.stop()\`, \`script_stop\`, session end or emergency stop.
-Limits: 8 concurrent scripts, 64MB per worker, 5s synchronous block detection,
-50 timers, 500 log lines. Poll \`script_list\` / \`script_logs\`; do not assume the
+Limits: 8 concurrent scripts sharing one 64MB-heap child process, 5s synchronous
+block detection, 50 timers, 500 log lines. Poll \`script_list\` / \`script_logs\`; do not assume the
 script finished immediately after \`script_run\` returns.
 
 ## Event subscriptions without code
@@ -111,10 +117,19 @@ Example: \`where: { field: "data.heart_rate", op: "gte", value: 150 }\`.
 
 - \`emergency_stop\` always works and never asks for confirmation. It stops every
   device, the game, the game runtime and every script, and cancels all event
-  subscriptions. Use it immediately if a device behaves unexpectedly.
-- Raw \`panel_api\` is blocked for: raw device messages, batch device writes,
-  MQTT direct publishing, serial/flashing/firmware, local-app launch, plugin/auth/
-  model writes, device deletion, and remote-session lifecycle.
+  subscriptions. Use it immediately if a device behaves unexpectedly. The agent's
+  stop does not latch the plugin.
+- If the **user** pressed the sidebar emergency stop, the plugin is latched:
+  every agent control (tools, scripts, raw API, game start) is refused until the
+  user clicks "resume" in the sidebar. There is no agent tool to clear the latch.
+- Raw \`panel_api\` is write-whitelisted: only capability actions, preset
+  operations, client UI writes, game start/stop/runtime control, brand
+  connect/disconnect, device rename/nickname/transport, stop-all and remote
+  emergency stop. Everything else (raw device messages, batch, MQTT, serial/
+  flashing/firmware, test loops, remote projection/session lifecycle, virtual
+  devices, plugin/auth/model writes) is blocked with a hint.
+- Paths are canonicalized before matching: case, \`.\`/\`..\`, \`%2e\`, repeated
+  slashes and trailing slashes cannot bypass the whitelist.
 - Session end stops that session's scripts and subscriptions. With
   \`stopOnSessionEnd\` (default true) it also stops all devices; with false the
   watchdog lease is kept alive while dsh runs.

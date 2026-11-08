@@ -36,12 +36,11 @@ test('per-capability shock defaults to 30%', () => {
   assert.equal(result.clamped[0].percent, 30)
 })
 
-test('zero and hundred percent reach the physical bounds', () => {
-  const zero = scaleCapabilityInput({
+test('zero percent refuses a positive action instead of silently applying zero', () => {
+  assert.throws(() => scaleCapabilityInput({
     capability: 'strength', action: 'set', input: { value: 200 },
     limits: { default: 0 }, ranges,
-  })
-  assert.equal(zero.input.value, 0)
+  }), /threshold is too low|below 1/i)
   const full = scaleCapabilityInput({
     capability: 'strength', action: 'set', input: { value: 999 },
     limits: { default: 100 }, ranges,
@@ -62,13 +61,17 @@ test('nested channels are scaled by wildcard paths', () => {
   assert.deepEqual(result.clamped.map((item) => item.field), ['channels.stroke.value', 'channels.vibe.value'])
 })
 
-test('unknown numeric fields are reported but not clamped', () => {
-  const result = scaleCapabilityInput({
+test('unknown numeric fields in an intensity capability are refused', () => {
+  assert.throws(() => scaleCapabilityInput({
     capability: 'strength', action: 'set', input: { value: 100, mystery: 999 },
     limits: limits60, ranges,
+  }), /unknown numeric field/)
+  const config = scaleCapabilityInput({
+    capability: 'reporting', action: 'setReportDelay', input: { ms: 100, extra: 999 },
+    limits: limits60, ranges,
   })
-  assert.equal(result.input.mystery, 999)
-  assert.deepEqual(result.unscaled, ['mystery'])
+  assert.equal(config.input.extra, 999)
+  assert.ok(config.unscaled.includes('extra'))
 })
 
 test('below-range intensity values are raised to the minimum', () => {
@@ -135,7 +138,7 @@ test('extractApiRanges reads actionParams and drops config-only fields', () => {
   assert.equal(extracted.strength.set.value.max, 255)
   assert.equal(extracted.reporting, undefined)
   assert.equal(extracted.pump.start.rate.max, 255)
-  assert.equal(extracted.pump.start.ss, undefined)
+  assert.equal(extracted.pump.start.ss.max, 255)
 })
 
 test('preset operations use the named capability or conservative field names', () => {

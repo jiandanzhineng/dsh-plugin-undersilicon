@@ -35,8 +35,14 @@ export function registerDeviceTools(ctx, deps) {
         }
         const result = await safety.operate({
           sessionId, source, deviceId: args.deviceId, operation: args.operation,
-          params: args.params || {}, definition, signal: exec.signal,
+          params: args.params || {}, definition, deviceType: device.type, signal: exec.signal,
         })
+        if (result.translated) {
+          return {
+            ok: true, deviceId: args.deviceId, operation: args.operation,
+            translated: true, actions: result.actions, results: result.results,
+          }
+        }
         const { _scaled, _mode, ...rest } = result
         return {
           ok: true, mode: _mode, deviceId: args.deviceId, operation: args.operation,
@@ -122,7 +128,7 @@ export function registerDeviceTools(ctx, deps) {
 
   ctx.tools.register(jsonTool({
     name: 'emergency_stop',
-    description: 'Emergency stop. Always allowed and never asks for confirmation. In local/remote-controlled mode it stops every device (watchdog stop-all), the current game, the game runtime and all scripts; in remote-operator mode it calls the remote session emergency stop and stops all scripts. It also cancels every event subscription so an event cannot immediately re-trigger control. Use immediately if anything goes wrong.',
+    description: 'Emergency stop. Always allowed and never asks for confirmation. In local/remote-controlled mode it stops every device (watchdog stop-all), the current game, the game runtime and all scripts; in remote-operator mode it calls the remote session emergency stop, stops the local game/runtime and stops scripts. It also cancels every event subscription so an event cannot immediately re-trigger control. The agent stop does not latch the plugin; if the user pressed the sidebar stop, controls stay refused until the user resumes in the panel. Use immediately if anything goes wrong.',
     parameters: {
       reason: { type: 'string', description: 'Short reason recorded in the audit log.' },
     },
@@ -130,11 +136,13 @@ export function registerDeviceTools(ctx, deps) {
     async execute(args, exec) {
       const sessionId = sessionIdOf(exec)
       const source = toolSource('emergency_stop', exec)
+      const reason = args.reason || 'agent emergency stop'
+      safety.halt({ reason })
       const stoppedScripts = scripts.stopAll('emergency-stop', undefined, { explicit: false })
       events.dispose()
       watchdog.stop(sessionId)
       const stop = await safety.emergencyStop({
-        sessionId, source, reason: args.reason || 'agent emergency stop', signal: exec.signal,
+        sessionId, source, reason, signal: exec.signal, skipHalt: true,
       })
       return { ...stop, stoppedScripts, subscriptions: 'all cancelled' }
     },

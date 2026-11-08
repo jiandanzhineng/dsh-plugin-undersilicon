@@ -50,7 +50,17 @@ test('dangerous raw endpoints are blocked, safe ones pass', () => {
   assert.throws(() => safety.assertRawAllowed('POST', '/remote-session/create'), SafetyError)
   assert.equal(safety.assertRawAllowed('GET', '/devices'), '/devices')
   assert.equal(safety.assertRawAllowed('POST', '/devices/pj-1/capabilities/strength/actions/set'), '/devices/pj-1/capabilities/strength/actions/set')
-  assert.equal(safety.assertRawAllowed('POST', '/events/recent'), '/events/recent')
+  assert.equal(safety.assertRawAllowed('GET', '/events/recent'), '/events/recent')
+  assert.throws(() => safety.assertRawAllowed('POST', '/events/recent'), SafetyError)
+  assert.throws(() => safety.assertRawAllowed('POST', '/test/start'), SafetyError)
+  assert.throws(() => safety.assertRawAllowed('POST', '/remote-projection/create'), SafetyError)
+  assert.throws(() => safety.assertRawAllowed('POST', '/remote-game/command'), SafetyError)
+  assert.throws(() => safety.assertRawAllowed('POST', '/virtual-devices/batch'), SafetyError)
+  assert.equal(safety.assertRawAllowed('PATCH', '/devices/pj-1'), '/devices/pj-1')
+  // Express is case-insensitive and tolerates dot/trailing-slash variants.
+  for (const path of ['/API/Devices/pj-1/Message', '/devices/pj-1/./message', '/devices/pj-1/message/', '/devices/pj-1/%2e/message']) {
+    assert.throws(() => safety.assertRawAllowed('POST', path), SafetyError, path)
+  }
 })
 
 test('control applies API ranges, audits and touches the watchdog', async (t) => {

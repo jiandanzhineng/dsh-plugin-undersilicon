@@ -19,12 +19,16 @@ function fail(error) {
  * Build the host-side handler for the browser panel's logical RPC channel.
  * The client calls `ctx.connection.rpc.call('/undersilicon', endpoint, payload)`.
  */
-export function createPanelHandler({ status, audit, scripts, events, emergencyStop }) {
+export function createPanelHandler({ status, audit, scripts, events, emergencyStop, emergencyResume, updateSettings, getSettings }) {
   return async (endpoint, payload = {}) => {
     try {
       switch (endpoint) {
         case 'state':
           return ok(await status())
+        case 'settings.get':
+          return ok(await getSettings())
+        case 'settings.set':
+          return ok(await updateSettings(payload || {}))
         case 'audit':
           return ok(audit.recent(Math.max(1, Math.min(100, Number(payload.limit) || 20))))
         case 'scripts':
@@ -42,6 +46,8 @@ export function createPanelHandler({ status, audit, scripts, events, emergencySt
           return ok({ stopped: events.unsubscribe(String(payload.id || '')) })
         case 'emergency.stop':
           return ok(await emergencyStop(payload))
+        case 'emergency.resume':
+          return ok(await emergencyResume(payload))
         default:
           return fail(Object.assign(new Error(`unknown panel endpoint: ${endpoint}`), { code: 'UNKNOWN_ENDPOINT' }))
       }

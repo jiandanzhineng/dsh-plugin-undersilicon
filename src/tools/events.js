@@ -33,8 +33,8 @@ export function registerEventTools(ctx, deps) {
       },
       mode: { type: 'string', enum: ['wake', 'inject'], description: 'wake starts a turn; inject waits for the next turn. Default wake.' },
       prompt: { type: 'string', description: 'Short reminder included with every delivery, e.g. "心率过高时把强度降到 0".' },
-      throttleMs: { type: 'integer', description: 'Merge window in ms (min 200). Default 1000.' },
-      maxEvents: { type: 'integer', description: 'Auto-unsubscribe after this many deliveries. Default 30.' },
+      throttleMs: { type: 'integer', description: 'Merge window in ms, 500-3600000. Default 1000.' },
+      maxEvents: { type: 'integer', description: 'Auto-unsubscribe after 1-1000 deliveries. Default 30. A session may hold at most 20 subscriptions.' },
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {

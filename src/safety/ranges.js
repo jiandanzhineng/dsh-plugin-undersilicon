@@ -10,7 +10,7 @@ export const FALLBACK_RANGES = Object.freeze({
   suction: { set: { value: { min: 0, max: 100 } } },
   estim: { set: { intensity: { min: 0, max: 255 } } },
   motors: { set: { 'channels.*.value': { min: 0, max: 255 }, 'channels.*': { min: 0, max: 255 } } },
-  pump: { start: { rate: { min: 0, max: 255 } } },
+  pump: { start: { rate: { min: 0, max: 255 }, ss: { min: 0, max: 255 } } },
 })
 
 /** Only intensity-like fields may be threshold-scaled. Config values stay intact. */
@@ -21,7 +21,12 @@ const SCALABLE = {
   suction: [/^value$/],
   estim: [/^intensity$/],
   motors: [/^channels\.[^.]+(\.value)?$/],
-  pump: [/^rate$/],
+  pump: [/^rate$/, /^ss$/],
+}
+
+/** Capabilities whose parameters can command physical output. */
+export function isIntensityCapability(capability) {
+  return Object.prototype.hasOwnProperty.call(SCALABLE, String(capability))
 }
 
 /** Whether a capability field participates in threshold scaling. */

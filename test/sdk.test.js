@@ -24,7 +24,7 @@ test('SDK surfaces the local API', async (t) => {
   const client = new ControlPanelClient({ baseUrl: mock.url })
   assert.equal((await client.remoteStatus()).active, false)
   assert.equal(client.lastMode, 'local')
-  assert.equal((await client.devices()).length, 3)
+  assert.equal((await client.devices()).length, 5)
   assert.equal((await client.device('pj-1')).type, 'PJ01')
   assert.equal((await client.deviceTypeConfig('PJ01')).capabilities[0], 'strength')
   const caps = await client.deviceCapabilities()

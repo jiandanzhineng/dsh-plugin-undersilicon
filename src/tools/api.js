@@ -9,7 +9,7 @@ export function registerApiTools(ctx, deps) {
     name: 'panel_api',
     description: [
       'Call the local control-panel HTTP API directly when no dedicated tool fits. Base is http://127.0.0.1:5278/api; pass a path such as /devices or /games/status (a leading /api is accepted).',
-      'The safety layer still applies: raw device messages (/devices/:id/message), /devices/batch, /mqtt-client, serial/flashing/firmware, local-app launch, plugin/auth/model writes, device deletion and remote-session lifecycle are blocked. Capability and operation paths are threshold-scaled. Every non-GET call is written to the audit log. Prefer dedicated tools when one exists.',
+      'GET/HEAD reads are allowed. Mutating requests are whitelisted: capability actions (scaled), preset operations (scaled, defaults merged), /client/* UI control, game start/stop/runtime control (game intensity params scaled), brand connect/disconnect, device rename/nickname/transport, device-watchdog/stop-all and remote-session/emergency-stop. Raw device messages, batch, test loops, remote projection/game/session lifecycle, virtual devices, MQTT/serial/flashing/firmware, local apps, plugins/auth/models and device deletion are blocked with a hint. Paths are canonicalized (case, dot segments, encoded slashes, trailing slashes), and a body must not contain both input and params. Every non-GET call is audited.',
     ].join('\n'),
     parameters: {
       method: { type: 'string', required: true, enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'], description: 'HTTP method.' },

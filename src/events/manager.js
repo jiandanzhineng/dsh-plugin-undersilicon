@@ -77,21 +77,43 @@ export class EventManager {
     this.subscriptions = new Map()
     this.ring = []
     this.lastSeq = undefined
-    this.state = { connected: false, mode: 'unknown', lastEventAt: null, error: null, fallback: false }
+    this.state = {
+      connected: false, status: 'idle', mode: 'unknown', lastEventAt: null,
+      error: null, fallback: false, nextRetryAt: null,
+    }
     this.abort = null
     this.loopPromise = null
     this.nextId = 1
     this.pollTimer = null
     this.deviceCache = new Map()
+    this.panelActive = false
+    this.panelTimer = null
   }
 
   limits() {
     return {
-      maxSubscriptions: Math.max(1, Number(this.config?.events?.maxSubscriptions ?? 16)),
-      minThrottleMs: Math.max(100, Number(this.config?.events?.minThrottleMs ?? 200)),
-      defaultThrottleMs: Math.max(200, Number(this.config?.events?.defaultThrottleMs ?? 1000)),
+      maxSubscriptions: Math.max(1, Number(this.config?.events?.maxSubscriptions ?? 20)),
+      minThrottleMs: Math.max(500, Number(this.config?.events?.minThrottleMs ?? 500)),
+      defaultThrottleMs: Math.max(500, Number(this.config?.events?.defaultThrottleMs ?? 1000)),
       defaultMaxEvents: Math.max(1, Number(this.config?.events?.maxEvents ?? 50)),
     }
+  }
+
+  /** Keeps the shared SSE warm while the sidebar panel is open (4s polling). */
+  keepPanelAlive(ttlMs = 15000) {
+    this.panelActive = true
+    if (this.panelTimer) this.clock.clearTimeout(this.panelTimer)
+    this.panelTimer = this.clock.setTimeout(() => {
+      this.panelTimer = null
+      this.panelActive = false
+      if (this.subscriptions.size === 0) this.stopStream()
+    }, ttlMs)
+    this.panelTimer?.unref?.()
+    void this.ensureStream()
+  }
+
+  shouldStream() {
+    return this.subscriptions.size > 0 || this.panelActive
   }
 
   /** Add a subscription and make sure the shared stream is running. */
@@ -100,11 +122,23 @@ export class EventManager {
     if (this.subscriptions.size >= limits.maxSubscriptions) {
       throw new Error(`too many event subscriptions (max ${limits.maxSubscriptions}); unsubscribe one first`)
     }
+    const ownerId = options.ownerId
+    if (ownerId !== undefined) {
+      const owned = [...this.subscriptions.values()].filter((item) => item.ownerId === ownerId).length
+      if (owned >= 20) throw new Error('this session already has 20 subscriptions; cancel one before adding another')
+    }
+    const rawThrottle = options.throttleMs === undefined ? limits.defaultThrottleMs : Number(options.throttleMs)
+    if (!Number.isFinite(rawThrottle)) throw new Error('throttleMs must be a finite number between 500 and 3600000')
+    const throttleMs = Math.max(500, Math.min(3600000, rawThrottle))
+    const rawMax = options.maxEvents === undefined ? limits.defaultMaxEvents : Number(options.maxEvents)
+    if (!Number.isFinite(rawMax) || rawMax < 1 || rawMax > 1000) {
+      throw new Error('maxEvents must be an integer between 1 and 1000')
+    }
     const id = `sub_${this.nextId++}`
     const subscription = {
       id,
       kind: options.kind || 'agent',
-      ownerId: options.ownerId,
+      ownerId,
       agent: options.agent,
       onEvent: options.onEvent,
       types: options.types || [],
@@ -112,8 +146,8 @@ export class EventManager {
       where: options.where,
       prompt: options.prompt || '',
       mode: options.mode === 'inject' ? 'inject' : 'wake',
-      throttleMs: Math.max(limits.minThrottleMs, Number(options.throttleMs ?? limits.defaultThrottleMs)),
-      maxEvents: Math.max(1, Number(options.maxEvents ?? limits.defaultMaxEvents)),
+      throttleMs,
+      maxEvents: Math.floor(rawMax),
       delivered: 0,
       pending: null,
       pendingCount: 0,
@@ -126,13 +160,13 @@ export class EventManager {
     return this.describe(subscription)
   }
 
-  /** Remove one subscription; the shared stream stops when the last one leaves. */
+  /** Remove one subscription; the shared stream stops when nothing needs it. */
   unsubscribe(id) {
     const subscription = this.subscriptions.get(id)
     if (!subscription) return false
     if (subscription.timer) this.clock.clearTimeout(subscription.timer)
     this.subscriptions.delete(id)
-    if (this.subscriptions.size === 0) this.stopStream()
+    if (!this.shouldStream()) this.stopStream()
     return true
   }
 
@@ -198,14 +232,27 @@ export class EventManager {
   }
 
   deliverScript(subscription, event) {
+    subscription.pendingCount += 1
+    subscription.firstTs ??= event.ts
+    subscription.pending = event
     if (subscription.timer) return
-    subscription.delivered += 1
-    try {
-      subscription.onEvent(event)
-    } catch (error) {
-      this.log('script event handler failed', { id: subscription.id, error: errorMessage(error) })
-    }
-    if (subscription.delivered >= subscription.maxEvents) this.finish(subscription, 'max-events')
+    subscription.timer = this.clock.setTimeout(() => {
+      subscription.timer = null
+      const latest = subscription.pending
+      if (!latest) return
+      const merged = { ...latest, _count: subscription.pendingCount, _firstTs: subscription.firstTs }
+      subscription.pending = null
+      subscription.pendingCount = 0
+      subscription.firstTs = null
+      subscription.delivered += 1
+      try {
+        subscription.onEvent(merged)
+      } catch (error) {
+        this.log('script event handler failed', { id: subscription.id, error: errorMessage(error) })
+      }
+      if (subscription.delivered >= subscription.maxEvents) this.finish(subscription, 'max-events')
+    }, subscription.throttleMs)
+    subscription.timer?.unref?.()
   }
 
   queueAgent(subscription, event) {
@@ -272,7 +319,7 @@ export class EventManager {
   }
 
   ensureStream() {
-    if (this.loopPromise || this.subscriptions.size === 0) return this.loopPromise
+    if (this.loopPromise || !this.shouldStream()) return this.loopPromise
     this.loopPromise = this.streamLoop().finally(() => { this.loopPromise = null })
     return this.loopPromise
   }
@@ -281,60 +328,85 @@ export class EventManager {
     const controller = new AbortController()
     this.abort = controller
     let backoff = 1000
-    while (this.subscriptions.size > 0 && !controller.signal.aborted) {
+    this.state.status = 'connecting'
+    this.state.nextRetryAt = null
+    while (this.shouldStream() && !controller.signal.aborted) {
       // Subscribe without a server-side type filter: the stream is shared and
       // subscriptions may be added after it connects, so a union captured here
       // would silently miss events for later subscriptions. Filtering stays
       // local in dispatch(), which already matches each subscription.
       try {
+        this.state.status = this.state.connected ? 'connected' : 'connecting'
         const outcome = await streamEvents({
           baseUrl: this.client.baseUrl,
           lastEventId: this.lastSeq,
           signal: controller.signal,
           onHello: (hello) => {
             this.state.connected = true
+            this.state.status = 'connected'
             this.state.fallback = false
+            this.state.error = null
+            this.state.nextRetryAt = null
             this.state.mode = hello.mode || this.state.mode
             if (Number.isFinite(hello.seq)) this.lastSeq = hello.seq
+            backoff = 1000
             this.stopPolling()
           },
           onEvent: (event) => {
             this.state.connected = true
+            this.state.status = 'connected'
+            this.state.error = null
             if (Number.isFinite(event._id)) this.lastSeq = event._id
             this.dispatch(event)
           },
         })
         if (outcome === 'aborted') break
         this.state.connected = false
+        if (this.shouldStream()) {
+          this.state.status = 'reconnecting'
+          this.state.error = 'event stream ended; reconnecting'
+        }
       } catch (error) {
         this.state.connected = false
         this.state.error = errorMessage(error)
         if (controller.signal.aborted) break
         if (error?.status === 404 || error?.code === 'EVENT_STREAM_UNAVAILABLE') {
           this.startPolling()
+        } else {
+          this.state.status = 'reconnecting'
         }
         this.log('event stream reconnect', { error: this.state.error, backoff })
       }
+      if (!this.shouldStream()) break
+      this.state.nextRetryAt = new Date(Date.now() + backoff).toISOString()
       await new Promise((resolve) => {
         const timer = this.clock.setTimeout(resolve, backoff)
         timer.unref?.()
         controller.signal.addEventListener('abort', () => { this.clock.clearTimeout(timer); resolve() }, { once: true })
       })
+      if (this.state.status === 'reconnecting') this.state.status = 'connecting'
       backoff = Math.min(15000, Math.floor(backoff * 1.7))
     }
     this.state.connected = false
+    this.state.nextRetryAt = null
+    if (!this.shouldStream()) this.state.status = 'idle'
   }
 
   stopStream() {
     this.stopPolling()
     this.abort?.abort()
     this.abort = null
+    this.state.connected = false
+    this.state.nextRetryAt = null
+    if (!this.shouldStream()) this.state.status = 'idle'
   }
 
   /** Poll devices when the A-side event stream is not deployed. */
   startPolling() {
     if (this.pollTimer) return
     this.state.fallback = true
+    this.state.status = 'fallback'
+    this.state.error = 'event stream endpoint unavailable; polling devices'
     const poll = async () => {
       try {
         const devices = await this.client.devices()
@@ -374,8 +446,12 @@ export class EventManager {
 
   /** Stop every subscription and the shared stream (plugin dispose / emergency). */
   dispose() {
+    this.panelActive = false
+    if (this.panelTimer) this.clock.clearTimeout(this.panelTimer)
+    this.panelTimer = null
     for (const id of [...this.subscriptions.keys()]) this.unsubscribe(id)
     this.stopStream()
+    this.state.status = 'idle'
   }
 }
 

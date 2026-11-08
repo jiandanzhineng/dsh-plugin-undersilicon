@@ -17,7 +17,7 @@ export function registerScriptTools(ctx, deps) {
 
   ctx.tools.register(jsonTool({
     name: 'script_run',
-    description: `Run agent-authored JavaScript in an isolated worker+vm sandbox, with every us.* call routed back through the safety layer and audit log.\n\n${SCRIPT_API}\n\nTop-level code may use await. A script that finishes without timers/listeners completes immediately; otherwise it keeps running until us.stop(), script_stop, emergency_stop or session end. Numeric control inputs are threshold-scaled exactly like device_control. Keep control loops bounded and always include an exit condition.`,
+    description: `Run agent-authored JavaScript in an isolated child process with one vm context per script, with every us.* call routed back through the safety layer and audit log. The child runs under Node's permission model (no fs writes, child processes, workers or native addons).\n\n${SCRIPT_API}\n\nTop-level code may use await. A script that finishes without timers/listeners completes immediately; otherwise it keeps running until us.stop(), script_stop, emergency_stop or session end. Numeric control inputs are threshold-scaled exactly like device_control. Keep control loops bounded and always include an exit condition. A blocked script restarts the shared sandbox and stops every script in it, so avoid infinite synchronous loops.` ,
     parameters: {
       code: { type: 'string', required: true, description: 'JavaScript source, top-level await allowed.' },
       name: { type: 'string', description: 'Short human-readable script name.' },

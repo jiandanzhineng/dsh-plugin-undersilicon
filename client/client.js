@@ -13,6 +13,9 @@ window.__ModuleLoader__.load({
       "panel.refresh": "刷新",
       "panel.emergency": "急停",
       "panel.emergencyHint": "立即停止所有设备、玩法与脚本",
+      "panel.emergencyLatched": "已急停 · 点击恢复",
+      "panel.emergencyResumeHint": "用户在侧栏锁定了急停；点击此按钮恢复 agent 控制",
+      "panel.emergencyLatchedBanner": "急停已锁定：agent 的所有控制都会被拒绝，点上方按钮恢复。",
       "panel.mode": "模式",
       "panel.mode.local": "本机",
       "panel.mode.remote-operator": "远程主控",
@@ -37,12 +40,27 @@ window.__ModuleLoader__.load({
       "panel.stream.off": "未连接",
       "panel.stream.idle": "待命（无订阅）",
       "panel.stream.fallback": "轮询兜底",
+      "panel.stream.connecting": "连接中…",
+      "panel.stream.reconnecting": "重连中",
+      "panel.stream.error": "错误",
       "panel.busy": "执行中…",
       "panel.emergencyDone": "已急停",
       "panel.error": "连接失败",
       "panel.clientPage": "当前页面",
       "panel.game": "玩法",
       "panel.noGame": "未运行",
+      "panel.settings": "设置",
+      "panel.settings.open": "编辑设置",
+      "panel.settings.close": "收起",
+      "panel.settings.threshold": "总阈值",
+      "panel.settings.capability": "按能力阈值",
+      "panel.settings.stopOnEnd": "会话结束停机",
+      "panel.settings.allowPersist": "允许持久脚本",
+      "panel.settings.watchdog": "看门狗 TTL（秒）",
+      "panel.settings.save": "保存设置",
+      "panel.settings.saved": "已保存，立即生效",
+      "panel.settings.note": "只有此面板能改阈值；agent 没有修改设置的 tool。",
+      "panel.settings.file": "设置文件",
     }
     const en = {
       "tab.title": "Undersilicon",
@@ -51,6 +69,9 @@ window.__ModuleLoader__.load({
       "panel.refresh": "Refresh",
       "panel.emergency": "Emergency stop",
       "panel.emergencyHint": "Stop every device, game and script now",
+      "panel.emergencyLatched": "Stopped · click to resume",
+      "panel.emergencyResumeHint": "The user latched the emergency stop; click to let the agent control again",
+      "panel.emergencyLatchedBanner": "Emergency stop is latched: every agent control is refused. Click the button above to resume.",
       "panel.mode": "Mode",
       "panel.mode.local": "Local",
       "panel.mode.remote-operator": "Remote operator",
@@ -75,12 +96,27 @@ window.__ModuleLoader__.load({
       "panel.stream.off": "disconnected",
       "panel.stream.idle": "idle (no subscriptions)",
       "panel.stream.fallback": "polling fallback",
+      "panel.stream.connecting": "connecting…",
+      "panel.stream.reconnecting": "reconnecting",
+      "panel.stream.error": "error",
       "panel.busy": "Working…",
       "panel.emergencyDone": "Stopped",
       "panel.error": "Connection failed",
       "panel.clientPage": "Current page",
       "panel.game": "Game",
       "panel.noGame": "Not running",
+      "panel.settings": "Settings",
+      "panel.settings.open": "Edit settings",
+      "panel.settings.close": "Close",
+      "panel.settings.threshold": "Global threshold",
+      "panel.settings.capability": "Per-capability threshold",
+      "panel.settings.stopOnEnd": "Stop on session end",
+      "panel.settings.allowPersist": "Allow persistent scripts",
+      "panel.settings.watchdog": "Watchdog TTL (seconds)",
+      "panel.settings.save": "Save settings",
+      "panel.settings.saved": "Saved and applied",
+      "panel.settings.note": "Only this panel can change thresholds; the agent has no settings tool.",
+      "panel.settings.file": "Settings file",
     }
 
     const style = {
@@ -95,6 +131,15 @@ window.__ModuleLoader__.load({
       dot: { width: "7px", height: "7px", borderRadius: "999px", display: "inline-block" },
       button: { padding: "4px 9px", borderRadius: "6px", border: "1px solid rgba(127,127,127,.35)", background: "transparent", color: "inherit", cursor: "pointer", fontSize: "11px" },
       emergency: { padding: "10px 12px", borderRadius: "8px", border: "1px solid #d92d20", background: "#d92d20", color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: "13px", width: "100%" },
+      emergencyLatched: { padding: "10px 12px", borderRadius: "8px", border: "1px solid #f97066", background: "#7a271a", color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: "13px", width: "100%" },
+      warning: { padding: "7px 9px", borderRadius: "6px", background: "rgba(247,144,9,.14)", border: "1px solid rgba(247,144,9,.45)", fontSize: "11px" },
+      barTrack: { position: "relative", height: "5px", borderRadius: "999px", background: "rgba(127,127,127,.2)", overflow: "hidden", marginTop: "2px" },
+      barFill: { position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: "999px" },
+      barLimit: { position: "absolute", top: "-2px", bottom: "-2px", width: "1px", background: "#f79009" },
+      barZone: { position: "absolute", top: 0, bottom: 0, background: "rgba(127,127,127,.13)" },
+      settings: { border: "1px solid rgba(127,127,127,.28)", borderRadius: "8px", padding: "8px", display: "flex", flexDirection: "column", gap: "6px" },
+      field: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" },
+      input: { width: "70px", padding: "2px 4px", borderRadius: "4px", border: "1px solid rgba(127,127,127,.35)", background: "transparent", color: "inherit", fontSize: "11px" },
       error: { padding: "8px", borderRadius: "6px", background: "rgba(217,45,32,.12)", border: "1px solid rgba(217,45,32,.35)" },
       list: { listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "5px" },
       item: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", padding: "5px 6px", borderRadius: "6px", background: "rgba(127,127,127,.07)" },
@@ -124,11 +169,57 @@ window.__ModuleLoader__.load({
       return parts.join(" · ")
     }
 
+    function DeviceBar({ bar }) {
+      const span = Math.max(1, bar.max - bar.min)
+      const valuePct = Math.max(0, Math.min(100, ((bar.value - bar.min) / span) * 100))
+      const limitPct = Math.max(0, Math.min(100, ((bar.limit - bar.min) / span) * 100))
+      const over = bar.value > bar.limit
+      return h("div", { style: { minWidth: 0 }, title: `${bar.label}: ${bar.value}${bar.unit || ""} / ${bar.max} · limit ${bar.limit}` },
+        h("div", { style: style.between },
+          h("span", { style: style.muted }, `${bar.label} ${bar.value}${bar.unit || ""}`),
+          h("span", { style: style.muted }, `≤ ${bar.limit}`)),
+        h("div", { style: style.barTrack },
+          h("div", { style: { ...style.barZone, left: `${limitPct}%`, right: 0 } }),
+          h("div", { style: { ...style.barFill, width: `${valuePct}%`, background: over ? "#f04438" : "#12b76a" } }),
+          h("div", { style: { ...style.barLimit, left: `${limitPct}%` } })))
+    }
+
+    function settingsDraft(state) {
+      const limits = state.thresholds || {}
+      const caps = {}
+      for (const key of state.availableCapabilities || []) {
+        caps[key] = Math.round(Number(limits.capabilities?.[key] ?? limits.default ?? 60))
+      }
+      return {
+        limits: { default: Math.round(Number(limits.default ?? 60)), capabilities: caps },
+        stopOnSessionEnd: state.settings?.stopOnSessionEnd !== false,
+        watchdogTtlSec: Math.round(Number(state.settings?.watchdogTtlSec ?? 30)),
+        scripts: { allowPersist: state.settings?.scripts?.allowPersist !== false },
+      }
+    }
+
+    function streamLabel(t, stream) {
+      const status = stream?.status || (stream?.connected ? "connected" : "off")
+      const map = {
+        connected: t("panel.stream.on"), connecting: t("panel.stream.connecting"),
+        reconnecting: t("panel.stream.reconnecting"), fallback: t("panel.stream.fallback"),
+        idle: t("panel.stream.idle"), off: t("panel.stream.off"),
+      }
+      let text = map[status] || t("panel.stream.off")
+      if (stream?.error && status !== "connected" && status !== "idle") {
+        text += ` · ${t("panel.stream.error")}: ${stream.error}`
+      }
+      return text
+    }
+
     function Panel({ t, call }) {
       const [data, setData] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const [updated, setUpdated] = React.useState(null)
+      const [settingsOpen, setSettingsOpen] = React.useState(false)
+      const [draft, setDraft] = React.useState(null)
+      const [saved, setSaved] = React.useState(false)
       const load = React.useCallback(async () => {
         try {
           const result = await call("state", {})
@@ -155,6 +246,35 @@ window.__ModuleLoader__.load({
         const result = await call("emergency.stop", { reason: "sidebar emergency stop" })
         if (!result?.ok) throw new Error(result?.error?.message || "emergency stop failed")
       })
+      const resume = () => run(t("panel.emergencyLatched"), async () => {
+        const result = await call("emergency.resume", { reason: "sidebar resume" })
+        if (!result?.ok) throw new Error(result?.error?.message || "resume failed")
+      })
+      const openSettings = () => {
+        setDraft(settingsDraft(data || {}))
+        setSaved(false)
+        setSettingsOpen(true)
+      }
+      const saveSettings = () => run(t("panel.settings.save"), async () => {
+        const result = await call("settings.set", draft)
+        if (!result?.ok) throw new Error(result?.error?.message || "save failed")
+        setSaved(true)
+      })
+      const setThreshold = (key, value) => {
+        setDraft((current) => {
+          if (!current) return current
+          if (key === "default") {
+            return { ...current, limits: { ...current.limits, default: Number(value) } }
+          }
+          return {
+            ...current,
+            limits: {
+              ...current.limits,
+              capabilities: { ...current.limits.capabilities, [key]: Number(value) },
+            },
+          }
+        })
+      }
       const stopScript = (id) => run(t("panel.stop"), async () => {
         const result = await call("script.stop", { id })
         if (!result?.ok) throw new Error(result?.error?.message || "stop failed")
@@ -170,33 +290,83 @@ window.__ModuleLoader__.load({
       const audit = state.audit || []
       const clientState = state.client || {}
       const game = state.game || {}
-
+      const latched = Boolean(state.emergency?.latched)
+      const streamStatus = state.stream?.status || (state.stream?.connected ? "connected" : "off")
+      const streamDot = streamStatus === "connected" ? "#12b76a"
+        : (streamStatus === "fallback" ? "#f79009" : (streamStatus === "reconnecting" ? "#f79009" : "#98a2b3"))
       const section = (title, body) => h("section", { style: { display: "flex", flexDirection: "column", gap: "6px" } },
         h("h3", { style: style.title }, title), body)
+      const thresholdKeys = Object.keys(draft?.limits?.capabilities || {})
 
       return h("div", { style: style.panel },
         h("div", { style: style.between },
           h("div", { style: style.row },
-            h("span", { style: { ...style.dot, background: state.stream?.connected ? "#12b76a" : (state.stream?.fallback ? "#f79009" : "#98a2b3") } }),
+            h("span", { style: { ...style.dot, background: streamDot } }),
             h("h2", { style: { ...style.title, fontSize: "15px" } }, t("panel.title"))),
           h("div", { style: style.row },
             h("span", { style: style.badge }, `${t("panel.mode")}: ${modeLabel(t, state.mode)}`),
             state.thresholds ? h("span", { style: style.badge }, `${t("panel.thresholds")}: ${state.thresholds.default}% / ${state.thresholds.capabilities?.shock ?? "-"}%`) : null,
             h("button", { style: style.button, onClick: () => { void load() }, disabled: busy }, t("panel.refresh")))),
-        h("button", { style: style.emergency, onClick: emergency, disabled: busy, title: t("panel.emergencyHint") },
-          busy ? t("panel.busy") : t("panel.emergency")),
+        h("button", {
+          style: latched ? style.emergencyLatched : style.emergency,
+          onClick: latched ? resume : emergency,
+          disabled: busy,
+          title: latched ? t("panel.emergencyResumeHint") : t("panel.emergencyHint"),
+        }, busy ? t("panel.busy") : (latched ? t("panel.emergencyLatched") : t("panel.emergency"))),
+        latched ? h("div", { style: style.warning }, t("panel.emergencyLatchedBanner")) : null,
         error ? h("div", { style: style.error }, error) : null,
         h("div", { style: style.muted },
-          `${t("panel.stream")}: ${state.stream?.connected ? t("panel.stream.on") : (state.stream?.fallback ? t("panel.stream.fallback") : (subscriptions.length === 0 ? t("panel.stream.idle") : t("panel.stream.off")))}` +
+          `${t("panel.stream")}: ${streamLabel(t, state.stream)}` +
           (updated ? ` · ${t("panel.updated")} ${updated}` : "") +
           (state.baseUrl ? ` · ${state.baseUrl}` : "")),
+        h("div", { style: style.row },
+          h("button", { style: style.button, onClick: () => (settingsOpen ? setSettingsOpen(false) : openSettings()) },
+            settingsOpen ? t("panel.settings.close") : t("panel.settings.open"))),
+        settingsOpen && draft ? h("div", { style: style.settings },
+          h("h3", { style: style.title }, t("panel.settings")),
+          h("div", { style: style.field },
+            h("span", null, `${t("panel.settings.threshold")}: ${draft.limits.default}%`),
+            h("input", {
+              type: "range", min: 0, max: 100, value: draft.limits.default,
+              onChange: (event) => setThreshold("default", event.target.value),
+            })),
+          ...thresholdKeys.map((key) => h("div", { key, style: style.field },
+            h("span", null, `${t("panel.settings.capability")} · ${key}: ${draft.limits.capabilities[key]}%`),
+            h("input", {
+              type: "range", min: 0, max: 100, value: draft.limits.capabilities[key],
+              onChange: (event) => setThreshold(key, event.target.value),
+            }))),
+          h("label", { style: style.field },
+            h("span", null, t("panel.settings.stopOnEnd")),
+            h("input", {
+              type: "checkbox", checked: draft.stopOnSessionEnd,
+              onChange: (event) => setDraft({ ...draft, stopOnSessionEnd: event.target.checked }),
+            })),
+          h("label", { style: style.field },
+            h("span", null, t("panel.settings.allowPersist")),
+            h("input", {
+              type: "checkbox", checked: draft.scripts.allowPersist,
+              onChange: (event) => setDraft({ ...draft, scripts: { ...draft.scripts, allowPersist: event.target.checked } }),
+            })),
+          h("label", { style: style.field },
+            h("span", null, t("panel.settings.watchdog")),
+            h("input", {
+              style: style.input, type: "number", min: 5, max: 600, value: draft.watchdogTtlSec,
+              onChange: (event) => setDraft({ ...draft, watchdogTtlSec: Number(event.target.value) }),
+            })),
+          h("div", { style: style.row },
+            h("button", { style: style.button, disabled: busy, onClick: saveSettings }, t("panel.settings.save")),
+            saved ? h("span", { style: style.muted }, t("panel.settings.saved")) : null),
+          h("div", { style: style.muted }, t("panel.settings.note")),
+          state.settings?.file ? h("div", { style: style.pre }, `${t("panel.settings.file")}: ${state.settings.file}`) : null) : null,
         section(t("panel.devices"), devices.length === 0 ? h("div", { style: style.muted }, t("panel.noDevices")) :
           h("div", { style: style.grid }, devices.map((device) => h("div", { key: device.id, style: style.card },
             h("div", { style: style.between },
               h("strong", { style: { overflow: "hidden", textOverflow: "ellipsis" } }, device.name || device.id),
               h("span", { style: style.dot, background: device.connected ? "#12b76a" : "#98a2b3" })),
             h("div", { style: style.muted }, `${device.type} · ${device.connected ? t("panel.connected") : t("panel.disconnected")}`),
-            liveText(device.data) ? h("div", { style: style.muted }, liveText(device.data)) : null)))),
+            liveText(device.data) ? h("div", { style: style.muted }, liveText(device.data)) : null,
+            ...(device.bars || []).map((bar) => h(DeviceBar, { key: bar.key, bar })))))),
         section(t("panel.clientPage"), h("div", { style: style.muted },
           [clientState.route || (clientState.available === false ? clientState.error : "-"),
             clientState.window ? `${t("panel.game")}: ${game.status?.gameId || game.runtime?.gameId || t("panel.noGame")}` : ""]

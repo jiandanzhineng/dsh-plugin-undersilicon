@@ -45,6 +45,12 @@ export function registerStatusTools(ctx, deps) {
         scripts: scripts.list({ sessionId }),
         subscriptions: events.list().filter((item) => item.ownerId === sessionId || item.kind === 'panel'),
         thresholds: config.limits,
+        settings: {
+          stopOnSessionEnd: config.stopOnSessionEnd,
+          watchdogTtlSec: config.watchdogTtlSec,
+        },
+        emergency: safety.emergencyState(),
+        eventStream: events.state,
         availableCapabilities: Object.keys(ranges || {}),
         watchdog: watchdog.status(),
         recentAudit: audit.recent(8),

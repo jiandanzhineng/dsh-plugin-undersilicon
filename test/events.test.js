@@ -20,7 +20,7 @@ async function harness() {
   const mock = await createMockServer().start()
   const client = new ControlPanelClient({ baseUrl: mock.url })
   const events = new EventManager({
-    client, config: { events: { maxSubscriptions: 8, minThrottleMs: 200, defaultThrottleMs: 200, maxEvents: 30 } },
+    client, config: { events: { maxSubscriptions: 8, minThrottleMs: 500, defaultThrottleMs: 500, maxEvents: 30 } },
     audit: new AuditLog({ enabled: false }),
   })
   return { mock, events }
@@ -40,13 +40,13 @@ test('wake subscriptions merge events inside the throttle window', async (t) => 
   const agent = fakeAgent()
   const subscription = h.events.subscribe({
     kind: 'agent', ownerId: 's1', agent, types: ['device.updated'],
-    mode: 'wake', prompt: 'watch heart rate', throttleMs: 200, maxEvents: 10,
+    mode: 'wake', prompt: 'watch heart rate', throttleMs: 500, maxEvents: 10,
   })
   await sleep(120)
   assert.equal(h.events.state.connected, true)
   h.mock.emit({ type: 'device.updated', deviceId: 'hr-1', data: { heart_rate: 100 } })
   h.mock.emit({ type: 'device.updated', deviceId: 'hr-1', data: { heart_rate: 160 } })
-  await sleep(400)
+  await sleep(800)
   assert.equal(agent.followed.length, 1)
   assert.equal(typeof agent.followed[0].id, 'string')
   assert.equal(agent.followed[0].role, 'user')
@@ -64,15 +64,15 @@ test('inject mode, device filter and where filter are honored', async (t) => {
   const subscription = h.events.subscribe({
     kind: 'agent', ownerId: 's1', agent, types: ['device.updated'],
     deviceId: 'hr-1', where: { field: 'data.heart_rate', op: 'gte', value: 150 },
-    mode: 'inject', throttleMs: 200, maxEvents: 10,
+    mode: 'inject', throttleMs: 500, maxEvents: 10,
   })
   await sleep(120)
   h.mock.emit({ type: 'device.updated', deviceId: 'other', data: { heart_rate: 200 } })
   h.mock.emit({ type: 'device.updated', deviceId: 'hr-1', data: { heart_rate: 100 } })
-  await sleep(400)
+  await sleep(800)
   assert.equal(agent.injected.length, 0)
   h.mock.emit({ type: 'device.updated', deviceId: 'hr-1', data: { heart_rate: 180 } })
-  await sleep(400)
+  await sleep(800)
   assert.equal(agent.injected.length, 1)
   assert.equal(agent.followed.length, 0)
   assert.match(agent.injected[0].content[0].text, /180/)
@@ -85,31 +85,58 @@ test('maxEvents auto-unsubscribes and injects a final note', async (t) => {
   const agent = fakeAgent()
   h.events.subscribe({
     kind: 'agent', ownerId: 's1', agent, types: ['client.route'],
-    mode: 'wake', throttleMs: 200, maxEvents: 1,
+    mode: 'wake', throttleMs: 500, maxEvents: 1,
   })
   await sleep(120)
   h.mock.emit({ type: 'client.route', path: '/games' })
-  await sleep(400)
+  await sleep(800)
   assert.equal(agent.followed.length, 1)
   assert.equal(agent.injected.length, 1)
   assert.match(agent.injected[0].content[0].text, /subscription ended/)
   assert.equal(h.events.list().length, 0)
 })
 
-test('script subscriptions receive every matching event through their callback', async (t) => {
+test('script subscriptions throttle and merge matching events', async (t) => {
   const h = await harness()
   t.after(() => h.mock.close())
   const received = []
   h.events.subscribe({
     kind: 'script', ownerId: 'script_1', types: ['game.state'],
-    onEvent: (event) => received.push(event), maxEvents: 10,
+    onEvent: (event) => received.push(event), maxEvents: 10, throttleMs: 500,
   })
   await sleep(120)
   h.mock.emit({ type: 'game.state', gameId: 'demo', snapshot: { score: 1 } })
   h.mock.emit({ type: 'game.state', gameId: 'demo', snapshot: { score: 2 } })
-  await sleep(120)
-  assert.equal(received.length, 2)
-  assert.equal(received[1].snapshot.score, 2)
+  await sleep(800)
+  assert.equal(received.length, 1)
+  assert.equal(received[0]._count, 2)
+  assert.equal(received[0].snapshot.score, 2)
+})
+
+test('subscription limits reject NaN/oversized values and cap per owner', async (t) => {
+  const h = await harness()
+  t.after(() => h.mock.close())
+  h.events.config = { events: { maxSubscriptions: 64, minThrottleMs: 500, defaultThrottleMs: 500, maxEvents: 30 } }
+  assert.throws(() => h.events.subscribe({ kind: 'agent', ownerId: 's1', types: ['device'], throttleMs: NaN }), /finite number/)
+  assert.throws(() => h.events.subscribe({ kind: 'agent', ownerId: 's1', types: ['device'], maxEvents: 0 }), /between 1 and 1000/)
+  assert.throws(() => h.events.subscribe({ kind: 'agent', ownerId: 's1', types: ['device'], maxEvents: 1001 }), /between 1 and 1000/)
+  for (let index = 0; index < 20; index += 1) {
+    h.events.subscribe({ kind: 'script', ownerId: 'script-x', types: ['device'], throttleMs: 500 })
+  }
+  assert.throws(() => h.events.subscribe({ kind: 'script', ownerId: 'script-x', types: ['device'], throttleMs: 500 }), /20 subscriptions/)
+  h.events.dispose()
+})
+
+test('the panel keepalive keeps the shared stream connected without subscriptions', async (t) => {
+  const h = await harness()
+  t.after(() => h.mock.close())
+  h.events.keepPanelAlive(3000)
+  await sleep(200)
+  assert.equal(h.events.list().length, 0)
+  assert.equal(h.events.state.connected, true)
+  assert.equal(h.events.state.status, 'connected')
+  h.events.dispose()
+  assert.equal(h.events.state.status, 'idle')
 })
 
 test('recent falls back to /api/events/recent and dispose clears everything', async (t) => {
@@ -130,9 +157,9 @@ test('a subscription added after the shared stream connects still receives its e
   await sleep(120)
   assert.equal(h.events.state.connected, true)
   const lateAgent = fakeAgent()
-  const late = h.events.subscribe({ kind: 'agent', ownerId: 's1', agent: lateAgent, types: ['client.route'], mode: 'inject', throttleMs: 200 })
+  const late = h.events.subscribe({ kind: 'agent', ownerId: 's1', agent: lateAgent, types: ['client.route'], mode: 'inject', throttleMs: 500 })
   h.mock.emit({ type: 'client.route', path: '/devices' })
-  await sleep(400)
+  await sleep(800)
   assert.equal(lateAgent.injected.length, 1)
   assert.equal(typeof lateAgent.injected[0].id, 'string')
   assert.equal(lateAgent.injected[0].role, 'user')

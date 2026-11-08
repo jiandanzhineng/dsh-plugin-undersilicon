@@ -99,22 +99,29 @@ test('sandbox has no require, process or host-realm Function escape', async (t) 
   const h = harness()
   t.after(() => h.manager.dispose())
   const code = `
-    const probe = {
-      process: typeof process,
-      require: typeof require,
-      globalProcess: typeof globalThis.process,
-      hostFunction: (() => { try { return us.devices.constructor.constructor("return process")() ? "escaped" : "undefined" } catch { return "blocked" } })(),
-      evalEscape: (() => { try { const f = Function("return process"); return f() ? "escaped" : "undefined" } catch { return "blocked" } })(),
-    }
-    return probe
+    const probes = {}
+    const attempt = (name, fn) => { try { const value = fn(); probes[name] = value && value.versions ? 'escaped' : 'blocked' } catch { probes[name] = 'blocked' } }
+    attempt('globalThis', () => globalThis.constructor.constructor('return process')())
+    attempt('usDevices', () => us.devices.constructor.constructor('return process')())
+    attempt('usControl', () => us.control.constructor.constructor('return process')())
+    attempt('usState', () => us.state.constructor.constructor('return process')())
+    attempt('promise', () => Promise.resolve().constructor.constructor('return process')())
+    attempt('error', () => new Error('x').constructor.constructor('return process')())
+    attempt('this', () => this.constructor.constructor('return process')())
+    attempt('callee', () => arguments.callee.constructor.constructor('return process')())
+    attempt('eval', () => eval('1 + 1'))
+    attempt('Function', () => Function('return process')())
+    attempt('binding', () => process.binding('fs'))
+    attempt('require', () => require('node:fs'))
+    try { await import('node:fs'); probes.import = 'escaped' } catch { probes.import = 'blocked' }
+    return probes
   `
   const started = await h.manager.run({ code, sessionId: 's1', agent: {} })
   const done = await waitStatus(h.manager, started.id, ['completed', 'error'])
   assert.equal(done.status, 'completed', done.lastError)
-  assert.deepEqual(done.result, {
-    process: 'undefined', require: 'undefined', globalProcess: 'undefined',
-    hostFunction: 'blocked', evalEscape: 'blocked',
-  })
+  for (const [name, value] of Object.entries(done.result)) {
+    assert.equal(value, 'blocked', name)
+  }
 })
 
 test('us.* RPC reaches the host bridge and returns JSON data', async (t) => {
@@ -235,4 +242,33 @@ test('worker memory cap stops a runaway allocation', async (t) => {
   })
   const done = await waitStatus(h.manager, started.id, ['error'], 8000)
   assert.match(done.lastError, /memory|worker|exited|heartbeat|blocked/i)
+})
+
+test('us.notify is rate limited and merges the excess into one summary', async (t) => {
+  const h = harness()
+  t.after(() => h.manager.dispose())
+  const script = {
+    id: 'script_notify', name: 'notify-test', sessionId: 's1', agent: {},
+    logs: [], notifyTimes: [], notifyPending: null, notifyTimer: null,
+  }
+  for (let index = 0; index < 5; index += 1) {
+    await h.manager.notify(script, `n${index}`, false)
+  }
+  assert.equal(h.calls.notify.length, 3)
+  assert.equal(script.notifyPending.count, 2)
+  await h.manager.flushNotify(script)
+  assert.equal(h.calls.notify.length, 4)
+  assert.match(h.calls.notify[3].text, /merged 2 notifications/)
+})
+
+test('stopAll only finalizes the scripts captured at call time', async (t) => {
+  const h = harness()
+  t.after(() => h.manager.dispose())
+  const first = await h.manager.run({ code: 'us.every(1000, () => {})', sessionId: 's1' })
+  await waitFor(() => h.manager.workers.get(first.id)?.status === 'running')
+  h.manager.stopAll('test-stop-all')
+  const second = await h.manager.run({ code: 'us.every(1000, () => {})', sessionId: 's1' })
+  await sleep(800)
+  assert.equal(h.manager.workers.get(first.id)?.status, 'stopped')
+  assert.equal(h.manager.workers.get(second.id)?.status, 'running')
 })

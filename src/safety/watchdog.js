@@ -21,8 +21,8 @@ export class Watchdog {
     return Math.max(2000, Math.floor(this.ttlSeconds * 1000 / 2))
   }
 
-  /** Create or refresh the lease for one session. Safe to call on every control. */
-  async touch(sessionId, { reason = 'agent-control' } = {}) {
+  /** Create or refresh the lease for one session before a control command. */
+  async touch(sessionId, { reason = 'agent-control', signal } = {}) {
     const id = watchdogClientId(sessionId)
     let lease = this.leases.get(id)
     if (!lease) {
@@ -32,27 +32,42 @@ export class Watchdog {
       lease.timer?.unref?.()
     }
     if (lease.disabled) return { ok: false, disabled: true, clientId: id }
-    return this.refresh(lease, reason)
+    return this.refresh(lease, reason, { signal })
   }
 
   /** Send one heartbeat. A 423 means remote mode owns safety; stop renewing. */
-  async refresh(lease, reason = 'refresh') {
+  async refresh(lease, reason = 'refresh', { signal } = {}) {
     if (lease.disabled) return { ok: false, disabled: true, clientId: lease.clientId }
     try {
-      const result = await this.client.watchdogHeartbeat(lease.clientId, this.ttlSeconds)
+      const result = await this.client.watchdogHeartbeat(lease.clientId, this.ttlSeconds, { signal })
       lease.lastBeat = new Date().toISOString()
       lease.errors = 0
       this.log('watchdog heartbeat', { clientId: lease.clientId, reason })
-      return result
+      return { ok: true, clientId: lease.clientId, result }
     } catch (error) {
       if (error?.status === 423) {
         this.stop(lease.clientId)
         this.log('watchdog disabled in remote mode', { clientId: lease.clientId })
-        return { ok: false, disabled: true, clientId: lease.clientId, code: error.code }
+        return { ok: false, disabled: true, clientId: lease.clientId, status: 423, code: error.code }
       }
       lease.errors += 1
       this.log('watchdog heartbeat failed', { clientId: lease.clientId, error: error?.message })
-      return { ok: false, error: error?.message, code: error?.code, clientId: lease.clientId }
+      return {
+        ok: false, clientId: lease.clientId, status: error?.status || 0,
+        error: error?.message, code: error?.code,
+      }
+    }
+  }
+
+  /** Apply a settings change without dropping the lease. */
+  setTtl(seconds) {
+    const next = Math.max(5, Math.min(600, Number(seconds) || 30))
+    if (next === this.ttlSeconds) return
+    this.ttlSeconds = next
+    for (const lease of this.leases.values()) {
+      if (lease.timer) this.clock.clearInterval(lease.timer)
+      lease.timer = this.clock.setInterval(() => { void this.refresh(lease) }, this.intervalMs())
+      lease.timer?.unref?.()
     }
   }
 

@@ -1,5 +1,5 @@
 import { jsonTool } from './helpers.js'
-import { compact, renderJson } from './helpers.js'
+import { compact, renderJson, sessionIdOf, toolSource } from './helpers.js'
 
 /** Register game discovery and control tools. */
 export function registerGameTools(ctx, deps) {
@@ -58,9 +58,13 @@ export function registerGameTools(ctx, deps) {
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
       try {
-        return await client.launchClientGame(args.gameId, {
-          deviceMap: args.deviceMapping, parameters: args.parameters, show: args.show !== false,
-        }, { signal: exec.signal })
+        const result = await safety.gameStart({
+          sessionId: sessionIdOf(exec), source: toolSource('game_start', exec),
+          gameId: args.gameId, deviceMapping: args.deviceMapping, parameters: args.parameters,
+          launch: true, show: args.show !== false, signal: exec.signal,
+        })
+        const { _scaled, ...rest } = result
+        return { ...rest, scaledParameters: _scaled.parameters, clamped: _scaled.clamped, scaledFields: _scaled.scaledFields }
       } catch (error) {
         if (error?.status === 503 || error?.code === 'CLIENT_UNAVAILABLE' || error?.status === 404) {
           throw new Error(`cannot launch "${args.gameId}" in the client UI: ${error.message}. The desktop client control bridge is unavailable; make sure the control-panel desktop app is running and the /api/client/games/:id/launch endpoint is deployed.`)
@@ -81,23 +85,23 @@ export function registerGameTools(ctx, deps) {
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
+      const sessionId = sessionIdOf(exec)
+      const source = toolSource('game_control', exec)
       if (args.action === 'stop') {
-        const [current, runtime] = await Promise.allSettled([
-          client.stopCurrentGame({ signal: exec.signal }),
-          client.gameRuntimeStop('agent-stop', { signal: exec.signal }),
-        ])
-        return {
-          ok: current.status === 'fulfilled' || runtime.status === 'fulfilled',
-          current: current.status === 'fulfilled' ? current.value : current.reason?.message,
-          runtime: runtime.status === 'fulfilled' ? runtime.value : runtime.reason?.message,
-        }
+        return safety.gameStop({ sessionId, source, reason: 'agent-stop', signal: exec.signal })
       }
       if (args.action === 'params') {
         if (!args.params) throw new Error('params is required for action=params')
-        return client.gameRuntimeParams(args.params, { signal: exec.signal })
+        const result = await safety.gameParams({ sessionId, source, params: args.params, signal: exec.signal })
+        const { _scaled, ...rest } = result
+        return { ...rest, scaledParameters: _scaled.parameters, clamped: _scaled.clamped, scaledFields: _scaled.scaledFields }
       }
       if (!args.actionName) throw new Error('actionName is required for action=action')
-      return client.gameRuntimeAction(args.actionName, args.payload || {}, { signal: exec.signal })
+      const result = await safety.gameAction({
+        sessionId, source, action: args.actionName, payload: args.payload || {}, signal: exec.signal,
+      })
+      const { _scaled, ...rest } = result
+      return { ...rest, scaledParameters: _scaled.parameters, clamped: _scaled.clamped, scaledFields: _scaled.scaledFields }
     },
   }))
 }

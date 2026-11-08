@@ -29,9 +29,9 @@ function fakeExec(extra = {}) {
 
 async function pluginHarness(config = {}) {
   const mock = await createMockServer().start()
-  const { ctx, tools, listeners } = fakeCtx()
+  const { ctx, tools, listeners, effects } = fakeCtx()
   apply(ctx, { baseUrl: mock.url, auditEnabled: false, scripts: { allowPersist: false }, ...config })
-  return { mock, ctx, tools, listeners }
+  return { mock, ctx, tools, listeners, effects }
 }
 
 test('the plugin registers the complete tool surface', async (t) => {
@@ -57,7 +57,7 @@ test('panel_status reports mode, devices and thresholds', async (t) => {
   t.after(() => h.mock.close())
   const value = await h.tools.get('panel_status').execute({}, fakeExec())
   assert.equal(value.mode, 'local')
-  assert.equal(value.devices.length, 3)
+  assert.equal(value.devices.length, 5)
   assert.equal(value.thresholds.default, 60)
   assert.equal(value.devices.find((device) => device.id === 'hr-1').keyData.heart_rate, 80)
 })
@@ -99,11 +99,54 @@ test('panel_api blocks bypass endpoints and allows normal reads', async (t) => {
   const h = await pluginHarness()
   t.after(() => h.mock.close())
   const list = await h.tools.get('panel_api').execute({ method: 'GET', path: '/devices' }, fakeExec())
-  assert.equal(list.length, 3)
+  assert.equal(list.length, 5)
   await assert.rejects(
     h.tools.get('panel_api').execute({ method: 'POST', path: '/devices/batch/operations', body: {} }, fakeExec()),
     /blocked/,
   )
+})
+
+test('device rename only forwards the name field', async (t) => {
+  const h = await pluginHarness()
+  t.after(() => h.mock.close())
+  const value = await h.tools.get('device_manage').execute({ action: 'rename', deviceId: 'pj-1', name: 'new name' }, fakeExec())
+  assert.equal(value.name, 'new name')
+  const patch = h.mock.state.requests.filter((request) => request.method === 'PATCH').at(-1)
+  assert.deepEqual(patch.body, { name: 'new name' })
+  await assert.rejects(
+    h.tools.get('panel_api').execute({ method: 'PATCH', path: '/devices/pj-1', body: { name: 'x', power: 255 } }, fakeExec()),
+    /only change name|refused fields/i,
+  )
+})
+
+test('game_start and game_control scale intensity parameters', async (t) => {
+  const h = await pluginHarness()
+  t.after(() => h.mock.close())
+  const started = await h.tools.get('game_start').execute({
+    gameId: 'demo', parameters: { maxMotorIntensity: 255, shockVoltage: 80, speed: 5 },
+  }, fakeExec())
+  assert.equal(started.scaledParameters.maxMotorIntensity, 120)
+  assert.equal(started.scaledParameters.shockVoltage, 30)
+  assert.equal(started.scaledParameters.speed, 5)
+  const changed = await h.tools.get('game_control').execute({
+    action: 'params', params: { maxMotorIntensity: '255', duration: 10 },
+  }, fakeExec())
+  assert.equal(changed.scaledParameters.maxMotorIntensity, 120)
+  assert.ok(changed.scaledFields.includes('maxMotorIntensity'))
+})
+
+test('preset operations translate invoke-style starts to scaled capability actions', async (t) => {
+  const h = await pluginHarness()
+  t.after(() => h.mock.close())
+  const value = await h.tools.get('device_control').execute({
+    deviceId: 'cz-1', operation: 'start', params: { voltage: 99 },
+  }, fakeExec())
+  assert.equal(value.translated, true)
+  assert.deepEqual(value.actions, ['shock.start', 'strength.set'])
+  const shock = h.mock.state.requests.filter((request) => request.path.includes('/cz-1/capabilities/shock/actions/start')).at(-1)
+  const strength = h.mock.state.requests.filter((request) => request.path.includes('/cz-1/capabilities/strength/actions/set')).at(-1)
+  assert.deepEqual(shock.body, { input: { voltage: 24 } })
+  assert.deepEqual(strength.body, { input: { value: 120 } })
 })
 
 test('emergency_stop stops devices and scripts', async (t) => {
@@ -155,6 +198,21 @@ test('stopOnSessionEnd=false leaves devices running', async (t) => {
   t.after(() => h.mock.close())
   h.listeners.get('agent/disposed')({ agent: { session: { id: 's1' } } })
   await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.equal(h.mock.state.requests.some((request) => request.path === '/api/device-watchdog/stop-all'), false)
+})
+
+test('plugin dispose stops devices with a bounded wait when stopOnSessionEnd is true', async (t) => {
+  const h = await pluginHarness()
+  t.after(() => h.mock.close())
+  assert.equal(h.effects.length >= 1, true)
+  await h.effects.at(-1)()
+  assert.equal(h.mock.state.requests.some((request) => request.path === '/api/device-watchdog/stop-all'), true)
+})
+
+test('plugin dispose does not stop devices when stopOnSessionEnd is false', async (t) => {
+  const h = await pluginHarness({ stopOnSessionEnd: false })
+  t.after(() => h.mock.close())
+  await h.effects.at(-1)()
   assert.equal(h.mock.state.requests.some((request) => request.path === '/api/device-watchdog/stop-all'), false)
 })
 
