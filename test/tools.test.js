@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createMockServer } from '../mock/server.js'
 import { apply } from '../index.js'
+import { registerScriptTools } from '../src/tools/scripts.js'
 
 function fakeCtx() {
   const tools = new Map()
@@ -216,3 +217,23 @@ test('plugin dispose does not stop devices when stopOnSessionEnd is false', asyn
   assert.equal(h.mock.state.requests.some((request) => request.path === '/api/device-watchdog/stop-all'), false)
 })
 
+test('script_run refuses before starting when the panel is latched', async () => {
+  const tools = new Map()
+  const ctx = { tools: { register(definition) { tools.set(definition.name, definition) } } }
+  let started = false
+  registerScriptTools(ctx, {
+    safety: {
+      assertActive() {
+        const error = new Error('emergency stop latched; resume in the panel')
+        error.code = 'EMERGENCY_LATCHED'
+        throw error
+      },
+    },
+    scripts: { run: async () => { started = true; return {} } },
+  })
+  await assert.rejects(
+    tools.get('script_run').execute({ code: 'us.log("hi")' }, fakeExec()),
+    (error) => error.code === 'EMERGENCY_LATCHED',
+  )
+  assert.equal(started, false)
+})

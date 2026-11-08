@@ -155,14 +155,15 @@ window.__ModuleLoader__.load({
       return labels[mode] || labels.unknown
     }
 
-    function liveText(data) {
+    function liveText(data, skip) {
       if (!data || typeof data !== "object") return ""
+      const hidden = Array.isArray(skip) ? skip : []
       const parts = []
-      if (data.power !== undefined) parts.push(`power ${data.power}`)
-      if (data.voltage !== undefined) parts.push(`${data.voltage}V`)
+      if (data.power !== undefined && !hidden.includes("power")) parts.push(`power ${data.power}`)
+      if (data.voltage !== undefined && !hidden.includes("voltage")) parts.push(`${data.voltage}V`)
       if (data.shock) parts.push("shock on")
-      if (data.vibration !== undefined) parts.push(`vib ${data.vibration}`)
-      if (data.suction !== undefined) parts.push(`suc ${data.suction}`)
+      if (data.vibration !== undefined && !hidden.includes("vibration")) parts.push(`vib ${data.vibration}`)
+      if (data.suction !== undefined && !hidden.includes("suction")) parts.push(`suc ${data.suction}`)
       if (data.heart_rate !== undefined) parts.push(`HR ${data.heart_rate}`)
       if (data.pressure !== undefined) parts.push(`P ${data.pressure}`)
       if (data.weight !== undefined) parts.push(`${data.weight}g`)
@@ -199,7 +200,8 @@ window.__ModuleLoader__.load({
     }
 
     function streamLabel(t, stream) {
-      const status = stream?.status || (stream?.connected ? "connected" : "off")
+      let status = stream?.status || (stream?.connected ? "connected" : "off")
+      if (status === "connecting" && stream?.error) status = "reconnecting"
       const map = {
         connected: t("panel.stream.on"), connecting: t("panel.stream.connecting"),
         reconnecting: t("panel.stream.reconnecting"), fallback: t("panel.stream.fallback"),
@@ -219,7 +221,9 @@ window.__ModuleLoader__.load({
       const [updated, setUpdated] = React.useState(null)
       const [settingsOpen, setSettingsOpen] = React.useState(false)
       const [draft, setDraft] = React.useState(null)
+      const [explicit, setExplicit] = React.useState([])
       const [saved, setSaved] = React.useState(false)
+      const [latchGuard, setLatchGuard] = React.useState(false)
       const load = React.useCallback(async () => {
         try {
           const result = await call("state", {})
@@ -245,18 +249,29 @@ window.__ModuleLoader__.load({
       const emergency = () => run(t("panel.emergency"), async () => {
         const result = await call("emergency.stop", { reason: "sidebar emergency stop" })
         if (!result?.ok) throw new Error(result?.error?.message || "emergency stop failed")
+        setLatchGuard(true)
+        setTimeout(() => setLatchGuard(false), 900)
       })
-      const resume = () => run(t("panel.emergencyLatched"), async () => {
-        const result = await call("emergency.resume", { reason: "sidebar resume" })
-        if (!result?.ok) throw new Error(result?.error?.message || "resume failed")
-      })
+      const resume = () => {
+        if (latchGuard) return
+        return run(t("panel.emergencyLatched"), async () => {
+          const result = await call("emergency.resume", { reason: "sidebar resume" })
+          if (!result?.ok) throw new Error(result?.error?.message || "resume failed")
+        })
+      }
       const openSettings = () => {
         setDraft(settingsDraft(data || {}))
+        setExplicit(Object.keys(data?.thresholds?.capabilities || {}))
         setSaved(false)
         setSettingsOpen(true)
       }
       const saveSettings = () => run(t("panel.settings.save"), async () => {
-        const result = await call("settings.set", draft)
+        const capabilities = {}
+        for (const key of explicit) {
+          if (draft?.limits?.capabilities?.[key] !== undefined) capabilities[key] = draft.limits.capabilities[key]
+        }
+        const payload = { ...draft, limits: { default: draft?.limits?.default, capabilities } }
+        const result = await call("settings.set", payload)
         if (!result?.ok) throw new Error(result?.error?.message || "save failed")
         setSaved(true)
       })
@@ -264,8 +279,14 @@ window.__ModuleLoader__.load({
         setDraft((current) => {
           if (!current) return current
           if (key === "default") {
-            return { ...current, limits: { ...current.limits, default: Number(value) } }
+            const next = Number(value)
+            const capabilities = { ...current.limits.capabilities }
+            for (const name of Object.keys(capabilities)) {
+              if (!explicit.includes(name)) capabilities[name] = next
+            }
+            return { ...current, limits: { ...current.limits, default: next, capabilities } }
           }
+          setExplicit((names) => (names.includes(key) ? names : [...names, key]))
           return {
             ...current,
             limits: {
@@ -291,7 +312,8 @@ window.__ModuleLoader__.load({
       const clientState = state.client || {}
       const game = state.game || {}
       const latched = Boolean(state.emergency?.latched)
-      const streamStatus = state.stream?.status || (state.stream?.connected ? "connected" : "off")
+      const rawStreamStatus = state.stream?.status || (state.stream?.connected ? "connected" : "off")
+      const streamStatus = rawStreamStatus === "connecting" && state.stream?.error ? "reconnecting" : rawStreamStatus
       const streamDot = streamStatus === "connected" ? "#12b76a"
         : (streamStatus === "fallback" ? "#f79009" : (streamStatus === "reconnecting" ? "#f79009" : "#98a2b3"))
       const section = (title, body) => h("section", { style: { display: "flex", flexDirection: "column", gap: "6px" } },
@@ -310,7 +332,7 @@ window.__ModuleLoader__.load({
         h("button", {
           style: latched ? style.emergencyLatched : style.emergency,
           onClick: latched ? resume : emergency,
-          disabled: busy,
+          disabled: busy || (latched && latchGuard),
           title: latched ? t("panel.emergencyResumeHint") : t("panel.emergencyHint"),
         }, busy ? t("panel.busy") : (latched ? t("panel.emergencyLatched") : t("panel.emergency"))),
         latched ? h("div", { style: style.warning }, t("panel.emergencyLatchedBanner")) : null,
@@ -365,7 +387,7 @@ window.__ModuleLoader__.load({
               h("strong", { style: { overflow: "hidden", textOverflow: "ellipsis" } }, device.name || device.id),
               h("span", { style: style.dot, background: device.connected ? "#12b76a" : "#98a2b3" })),
             h("div", { style: style.muted }, `${device.type} · ${device.connected ? t("panel.connected") : t("panel.disconnected")}`),
-            liveText(device.data) ? h("div", { style: style.muted }, liveText(device.data)) : null,
+            (() => { const extra = liveText(device.data, (device.bars || []).map((bar) => bar.key)); return extra ? h("div", { style: style.muted }, extra) : null })(),
             ...(device.bars || []).map((bar) => h(DeviceBar, { key: bar.key, bar })))))),
         section(t("panel.clientPage"), h("div", { style: style.muted },
           [clientState.route || (clientState.available === false ? clientState.error : "-"),
@@ -378,7 +400,7 @@ window.__ModuleLoader__.load({
               h("span", { style: style.muted }, ` · ${script.status}`),
               script.lastError ? h("div", { style: { ...style.pre, color: "#d92d20" } }, script.lastError) : null,
               (script.logs || []).slice(-2).map((line, index) => h("div", { key: index, style: style.pre }, line.text))),
-            h("button", { style: style.button, disabled: busy || script.status === "completed" || script.status === "stopped", onClick: () => { void stopScript(script.id) } }, t("panel.stop")))))),
+            h("button", { style: { ...style.button, ...(busy || script.status === "completed" || script.status === "stopped" ? style.disabledButton : {}) }, disabled: busy || script.status === "completed" || script.status === "stopped", onClick: () => { void stopScript(script.id) } }, t("panel.stop")))))),
         section(t("panel.subscriptions"), subscriptions.length === 0 ? h("div", { style: style.muted }, t("panel.noSubscriptions")) :
           h("ul", { style: style.list }, subscriptions.map((subscription) => h("li", { key: subscription.id, style: style.item },
             h("span", { style: { minWidth: 0 } },

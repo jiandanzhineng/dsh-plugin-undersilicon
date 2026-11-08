@@ -13,7 +13,7 @@ const SCRIPT_API = [
 
 /** Register script sandbox tools. */
 export function registerScriptTools(ctx, deps) {
-  const { scripts } = deps
+  const { scripts, safety } = deps
 
   ctx.tools.register(jsonTool({
     name: 'script_run',
@@ -25,6 +25,7 @@ export function registerScriptTools(ctx, deps) {
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
+      safety.assertActive()
       const result = await scripts.run({
         code: args.code, name: args.name, persist: args.persist === true,
         sessionId: sessionIdOf(exec), agent: exec.agent, source: 'tool',
