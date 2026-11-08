@@ -155,6 +155,14 @@ window.__ModuleLoader__.load({
       return labels[mode] || labels.unknown
     }
 
+    // 只显示路由路径，不展示 query（含 gameToken 等内部参数）；游戏页附上游戏 id。
+    function displayRoute(route) {
+      if (typeof route !== "string" || !route) return ""
+      const [path, query = ""] = route.split("?")
+      const gameId = new URLSearchParams(query).get("id")
+      return gameId && path.startsWith("/plays/game") ? `${path} (${gameId})` : path
+    }
+
     function liveText(data, skip) {
       if (!data || typeof data !== "object") return ""
       const hidden = Array.isArray(skip) ? skip : []
@@ -392,7 +400,7 @@ window.__ModuleLoader__.load({
             (() => { const extra = liveText(device.data, (device.bars || []).map((bar) => bar.key)); return extra ? h("div", { style: style.muted }, extra) : null })(),
             ...(device.bars || []).map((bar) => h(DeviceBar, { key: bar.key, bar })))))),
         section(t("panel.clientPage"), h("div", { style: style.muted },
-          [clientState.route || (clientState.available === false ? clientState.error : "-"),
+          [displayRoute(clientState.route) || (clientState.available === false ? clientState.error : "-"),
             clientState.window ? `${t("panel.game")}: ${game.status?.gameId || game.runtime?.gameId || t("panel.noGame")}` : ""]
             .filter(Boolean).join(" · "))),
         section(t("panel.scripts"), scripts.length === 0 ? h("div", { style: style.muted }, t("panel.noScripts")) :
