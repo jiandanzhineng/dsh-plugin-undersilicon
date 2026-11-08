@@ -104,7 +104,8 @@ export class PanelHttp {
       signal: controller.signal,
       redirect: 'error',
     }
-    if (body !== undefined) {
+    const verb = String(method || 'GET').toUpperCase()
+    if (body !== undefined && body !== null && verb !== 'GET' && verb !== 'HEAD') {
       init.headers = { ...init.headers, 'content-type': 'application/json' }
       init.body = JSON.stringify(body)
     }

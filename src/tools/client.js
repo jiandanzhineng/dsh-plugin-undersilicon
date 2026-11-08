@@ -24,11 +24,12 @@ export function registerClientTools(ctx, deps) {
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
+      const scoped = client.forSession(sessionIdOf(exec))
       switch (args.action) {
         case 'state':
-          return client.clientState({ signal: exec.signal })
+          return scoped.clientState({ signal: exec.signal })
         case 'routes':
-          return client.clientRoutes({ signal: exec.signal })
+          return scoped.clientRoutes({ signal: exec.signal })
         case 'window':
           if (!args.windowAction) throw new Error('windowAction is required for action=window')
           return safety.raw({
@@ -37,7 +38,7 @@ export function registerClientTools(ctx, deps) {
           })
         case 'navigate': {
           if (!args.path) throw new Error('path is required for action=navigate')
-          const routes = await client.clientRoutes({ signal: exec.signal }).catch(() => null)
+          const routes = await scoped.clientRoutes({ signal: exec.signal }).catch(() => null)
           if (Array.isArray(routes)) {
             const pathname = String(args.path).split('?')[0]
             const known = routes.some((route) => route.path === pathname || route.path === args.path)
@@ -77,7 +78,8 @@ export function registerClientTools(ctx, deps) {
     async execute(args, exec) {
       const delay = Math.max(0, Math.min(5000, Number(args.delayMs) || 0))
       if (delay > 0) await sleep(delay, exec.signal)
-      const capture = () => client.clientScreenshot({
+      const scoped = client.forSession(sessionIdOf(exec))
+      const capture = () => scoped.clientScreenshot({
         format: args.format || 'png', maxWidth: args.maxWidth ?? 1280,
       }, { signal: exec.signal })
       let shot = await capture()

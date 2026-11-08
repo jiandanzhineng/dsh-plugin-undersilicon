@@ -77,11 +77,12 @@ export async function consumeSse(response, { onHello, onEvent, onComment, signal
  * Open the control-panel global event stream.
  * @returns {Promise<'ended'|'aborted'>} resolves when the stream closes normally or the caller aborts.
  */
-export async function streamEvents({ baseUrl, fetchImpl, types, lastEventId, signal, onHello, onEvent, onComment, timeoutMs = 15000 }) {
+export async function streamEvents({ baseUrl, fetchImpl, types, lastEventId, signal, onHello, onEvent, onComment, timeoutMs = 15000, agentClientId }) {
   const http = new PanelHttp({ baseUrl, fetchImpl, timeoutMs })
   const url = new URL(`${http.baseUrl}/events/stream`)
   if (types?.length) url.searchParams.set('types', types.join(','))
   const headers = { accept: 'text/event-stream', 'cache-control': 'no-cache' }
+  if (agentClientId) headers['x-agent-client'] = agentClientId
   if (lastEventId !== undefined && lastEventId !== null) headers['last-event-id'] = String(lastEventId)
   let response
   try {

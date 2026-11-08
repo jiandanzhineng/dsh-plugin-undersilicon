@@ -137,6 +137,114 @@ const IMPLICIT_DEFAULTS = {
   shock: { start: { voltage: 24 } },
 }
 
+/** Fields the plugin understands for each intensity capability action. */
+const INTENSITY_FIELDS = {
+  strength: { set: ['value'], stop: [] },
+  shock: { start: ['voltage'], stop: [] },
+  vibration: { set: ['value'], stop: [] },
+  suction: { set: ['value'], stop: [] },
+  estim: { set: ['intensity', 'channel', 'wave'], stop: [] },
+  motors: { set: ['channels'], stop: [] },
+  pump: { start: ['protocol', 'scene', 'rate', 'ss'], stop: [] },
+}
+const OUTPUT_FIELDS = new Set(['value', 'voltage', 'intensity', 'rate', 'ss'])
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const CHANNEL_NAME = /^[A-Za-z0-9_-]{1,32}$/
+const CHANNELS_BY_TYPE = {
+  YCY_TOY: ['a', 'b', 'c'],
+  YCY_CUP: ['stroke', 'vibe', 'axis'],
+}
+
+function invalidValue(field, value, capability, action) {
+  throw new SafetyError(
+    `强度字段 "${field}" 必须是有限数字（不接受布尔/对象/数组/非数字字符串）。` +
+    `Intensity field "${field}" must be a finite number; booleans, objects, arrays and non-numeric strings are refused.`,
+    'INVALID_INTENSITY_VALUE', { capability, action, field, value },
+  )
+}
+
+/** Reject dot paths, prototype keys, bad channel shapes and non-numeric output values. */
+export function assertIntensityInput({ capability, action, input, deviceType }) {
+  const allowed = INTENSITY_FIELDS[capability]?.[String(action).toLowerCase()]
+  if (!allowed) return
+  const source = input === undefined || input === null ? {} : input
+  if (typeof source !== 'object' || Array.isArray(source)) {
+    throw new SafetyError(`capability "${capability}.${action}" input must be an object`, 'INVALID_INPUT', { capability, action })
+  }
+  for (const key of Object.keys(source)) {
+    if (DANGEROUS_KEYS.has(key)) {
+      throw new SafetyError(`refused dangerous field "${key}"`, 'UNKNOWN_INTENSITY_FIELD', { capability, action, field: key })
+    }
+    if (!allowed.includes(key)) {
+      throw new SafetyError(
+        `capability "${capability}.${action}" refuses unknown numeric field "${key}"; allowed: ${allowed.join(', ') || '(none)'}`,
+        'UNKNOWN_INTENSITY_FIELD', { capability, action, field: key },
+      )
+    }
+  }
+  for (const field of allowed) {
+    if (!OUTPUT_FIELDS.has(field) || source[field] === undefined) continue
+    try {
+      parseStrictNumber(source[field], field)
+    } catch {
+      invalidValue(field, source[field], capability, action)
+    }
+  }
+  if (capability === 'motors' && source.channels !== undefined) assertChannels(source.channels, action, deviceType)
+}
+
+function assertChannels(channels, action, deviceType) {
+  const known = CHANNELS_BY_TYPE[deviceType]
+  if (!channels || typeof channels !== 'object' || Array.isArray(channels)) {
+    throw new SafetyError(
+      'motors.set channels 必须是对象 {name: 数字|{value,direction}}。motors.set channels must be an object.',
+      'INVALID_INTENSITY_VALUE', { capability: 'motors', action, field: 'channels' },
+    )
+  }
+  for (const [name, raw] of Object.entries(channels)) {
+    if (DANGEROUS_KEYS.has(name) || name.includes('.') || !CHANNEL_NAME.test(name)) {
+      throw new SafetyError(
+        `motors 通道名 "${name}" 非法（不允许点号/原型键/特殊字符）。Invalid motors channel name "${name}".`,
+        'UNKNOWN_INTENSITY_FIELD', { capability: 'motors', action, field: `channels.${name}` },
+      )
+    }
+    if (known && !known.includes(name)) {
+      throw new SafetyError(
+        `设备 ${deviceType} 不支持 motors 通道 "${name}"；允许：${known.join(', ')}。` +
+        ` Device ${deviceType} does not have motors channel "${name}"; allowed: ${known.join(', ')}.`,
+        'UNKNOWN_CHANNEL', { capability: 'motors', action, field: `channels.${name}`, deviceType, allowed: known },
+      )
+    }
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const key of Object.keys(raw)) {
+        if (key !== 'value' && key !== 'direction') {
+          throw new SafetyError(
+            `motors 通道 "${name}" 不允许字段 "${key}"。Invalid motors channel field "${key}".`,
+            'UNKNOWN_INTENSITY_FIELD', { capability: 'motors', action, field: `channels.${name}.${key}` },
+          )
+        }
+      }
+      try {
+        parseStrictNumber(raw.value, `channels.${name}.value`)
+      } catch {
+        invalidValue(`channels.${name}.value`, raw.value, 'motors', action)
+      }
+      if (raw.direction !== undefined && ![ -1, 0, 1 ].includes(Number(raw.direction))) {
+        throw new SafetyError(
+          `motors 通道 "${name}" 的 direction 只能是 -1、0 或 1。direction must be -1, 0 or 1.`,
+          'INVALID_INTENSITY_VALUE', { capability: 'motors', action, field: `channels.${name}.direction`, value: raw.direction },
+        )
+      }
+      continue
+    }
+    try {
+      parseStrictNumber(raw, `channels.${name}`)
+    } catch {
+      invalidValue(`channels.${name}`, raw, 'motors', action)
+    }
+  }
+}
+
 /**
  * Scale one capability action input to the configured thresholds.
  * Numeric strings are parsed and sent back as numbers; unknown numeric fields
@@ -144,12 +252,13 @@ const IMPLICIT_DEFAULTS = {
  * @param {{capability:string,action:string,input:unknown,limits:object,ranges:object}} options
  * @returns {{input:unknown, clamped:Array<object>, unscaled:string[], percent:number}}
  */
-export function scaleCapabilityInput({ capability, action, input, limits, ranges }) {
+export function scaleCapabilityInput({ capability, action, input, limits, ranges, deviceType }) {
   const intensity = isIntensityCapability(capability)
   const source = input === undefined || input === null ? {} : input
   if (typeof source !== 'object' || Array.isArray(source)) {
     throw new SafetyError(`capability "${capability}.${action}" input must be an object`, 'INVALID_INPUT', { capability, action })
   }
+  assertIntensityInput({ capability, action, input: source, deviceType })
   // JSON.stringify would turn NaN/Infinity into null before any range check.
   for (const leaf of flattenLeaves(source)) {
     if (typeof leaf.value === 'number' && !Number.isFinite(leaf.value)) {
@@ -199,6 +308,10 @@ export function scaleCapabilityInput({ capability, action, input, limits, ranges
       applied = upper
       reason = upper >= range.max ? 'above-range' : 'above-threshold'
     }
+    if (typeof leaf.value === 'string') {
+      // The backend only accepts real JSON numbers; always send the parsed value.
+      setByPath(output, field, applied)
+    }
     if (applied !== requested) {
       if (Number.isInteger(requested) && Number.isInteger(range.min) && Number.isInteger(range.max)) {
         // A 30% cap on 0..255 is 76.5: the reachable integer must be 76, not 77.
@@ -215,15 +328,17 @@ export function scaleCapabilityInput({ capability, action, input, limits, ranges
   for (const item of clamped) {
     if (item.requested > 0 && item.applied < 1) {
       throw new SafetyError(
-        `"${capability}.${action}" would apply ${item.field}=${item.applied} (requested ${item.requested}); the threshold is too low to be meaningful, so the action was refused`,
+        `"${capability}.${action}" 按当前阈值只能应用 ${item.field}=${item.applied}（请求 ${item.requested}），阈值过低没有实际意义，已拒绝。` +
+        ` Refused: the configured threshold is too low to be meaningful (would apply ${item.field}=${item.applied} for requested ${item.requested}).`,
         'INTENSITY_BELOW_MINIMUM', { capability, action, ...item },
       )
     }
   }
   if (capability === 'shock' && action === 'start' && Number(output.voltage) < 1) {
     throw new SafetyError(
-      'shock.start always sends an explicit voltage; the scaled value is below 1V, so the action was refused ' +
-      '(the backend would otherwise substitute its 24V default)',
+      '电击启动必须显式发送电压，但缩放后的电压低于 1V，已拒绝（否则后端会用 24V 默认值）。' +
+      ' shock.start always sends an explicit voltage; the scaled value is below 1V, so the action was refused ' +
+      '(the backend would otherwise substitute its 24V default).',
       'INTENSITY_BELOW_MINIMUM', { capability, action, voltage: output.voltage, percent },
     )
   }
@@ -234,10 +349,10 @@ export function scaleCapabilityInput({ capability, action, input, limits, ranges
  * Scale a preset operation whose capability/action may be unknown. Field-name
  * ranges are used as a conservative last resort; unknown numerics stay untouched.
  */
-export function scaleOperationInput({ operation, input, limits, ranges }) {
+export function scaleOperationInput({ operation, input, limits, ranges, deviceType }) {
   if (operation?.capability && operation?.action) {
     return scaleCapabilityInput({
-      capability: operation.capability, action: operation.action, input, limits, ranges,
+      capability: operation.capability, action: operation.action, input, limits, ranges, deviceType,
     })
   }
   const nameIndex = {}

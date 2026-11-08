@@ -45,16 +45,14 @@ export class ScriptManager {
     this.seq = 1
     this.monitor = null
     this.restored = false
-    this.host = sandbox || new SandboxHost({
-      log,
-      onMessage: (message) => { void this.onSandboxMessage(message) },
-      onExit: (info) => this.onSandboxExit(info),
-    })
+    this.sharedSandbox = sandbox || null
+    this.hosts = new Map()
   }
 
   get limits() {
     return {
       maxConcurrent: Math.max(1, Number(this.config?.scripts?.maxConcurrent ?? 8)),
+      maxSessions: Math.max(1, Number(this.config?.scripts?.maxSessions ?? 8)),
       memoryMb: Math.max(16, Number(this.config?.scripts?.memoryMb ?? 64)),
       syncTimeoutMs: Math.max(100, Number(this.config?.scripts?.syncTimeoutMs ?? 5000)),
       heartbeatTimeoutMs: Math.max(1000, Number(this.config?.scripts?.heartbeatTimeoutMs ?? 5000)),
@@ -63,8 +61,61 @@ export class ScriptManager {
     }
   }
 
-  running() {
-    return [...this.workers.values()].filter((script) => !script.finalized)
+  running(sessionId) {
+    return [...this.workers.values()].filter((script) => (
+      !script.finalized && (sessionId === undefined || script.sessionId === sessionId)
+    ))
+  }
+
+  /** One sandbox child per dsh session; a runaway script only blocks its own session. */
+  hostFor(sessionId, memoryMb) {
+    if (this.sharedSandbox) {
+      this.sharedSandbox.ensure({ memoryMb })
+      return this.sharedSandbox
+    }
+    let entry = this.hosts.get(sessionId)
+    if (!entry) {
+      this.pruneIdleHosts()
+      if (this.hosts.size >= this.limits.maxSessions) {
+        throw new Error(`too many script sandbox processes (max ${this.limits.maxSessions}); wait for another session to finish`)
+      }
+      let host
+      host = new SandboxHost({
+        log: this.log,
+        onMessage: (message) => { void this.onSandboxMessage(message) },
+        onExit: (info) => this.onSandboxExit(info, sessionId, host),
+      })
+      entry = { host, sessionId }
+      this.hosts.set(sessionId, entry)
+    }
+    entry.host.ensure({ memoryMb })
+    return entry.host
+  }
+
+  hostForScript(script) {
+    return script.host || this.sharedSandbox || this.hosts.get(script.sessionId)?.host || null
+  }
+
+  /** Use a session-tagged client when the SDK supports it (test doubles do not). */
+  clientFor(sessionId) {
+    if (typeof this.client.forSession === 'function') return this.client.forSession(sessionId)
+    return this.client
+  }
+
+  pruneIdleHosts() {
+    for (const [sessionId, entry] of [...this.hosts]) {
+      if (this.running(sessionId).length > 0) continue
+      entry.host.dispose()
+      this.hosts.delete(sessionId)
+    }
+  }
+
+  releaseHostIfIdle(sessionId) {
+    if (this.sharedSandbox || !sessionId || this.running(sessionId).length > 0) return
+    const entry = this.hosts.get(sessionId)
+    if (!entry) return
+    this.hosts.delete(sessionId)
+    entry.host.dispose()
   }
 
   /** Start one script. Returns immediately; poll script_list for the outcome. */
@@ -73,12 +124,13 @@ export class ScriptManager {
     if (!text.trim()) throw new Error('script code must be a non-empty string')
     if (text.length > 200000) throw new Error('script code is too large (max 200000 characters)')
     const limits = this.limits
-    if (this.running().length >= limits.maxConcurrent) {
-      throw new Error(`too many running scripts (max ${limits.maxConcurrent}); stop one first`)
+    if (this.running(sessionId).length >= limits.maxConcurrent) {
+      throw new Error(`too many running scripts in this session (max ${limits.maxConcurrent}); stop one first`)
     }
     const id = `script_${this.seq++}_${Date.now().toString(36)}`
+    const host = this.hostFor(sessionId, limits.memoryMb)
     const script = {
-      id, name: name || id, code: text, status: 'starting', sessionId, agent,
+      id, name: name || id, code: text, status: 'starting', sessionId, agent, host,
       persist: Boolean(persist && limits.allowPersist), source,
       createdAt: new Date().toISOString(), startedAt: null, endedAt: null,
       lastHeartbeat: Date.now(), logs: [], result: null, error: null,
@@ -88,8 +140,7 @@ export class ScriptManager {
     }
     this.workers.set(id, script)
     this.ensureMonitor()
-    this.host.ensure({ memoryMb: limits.memoryMb })
-    const sent = this.host.post({
+    const sent = host.post({
       type: 'run', scriptId: id, code: text,
       limits: {
         maxTimers: 50, minIntervalMs: 200,
@@ -155,13 +206,17 @@ export class ScriptManager {
     }
   }
 
-  onSandboxExit({ code, signal, intentional }) {
+  onSandboxExit({ code, signal, intentional }, sessionId, host) {
     const reason = intentional ? 'sandbox-disposed' : `sandbox process exited (code ${code ?? '-'} signal ${signal ?? '-'})`
+    const entry = sessionId === undefined ? null : this.hosts.get(sessionId)
+    if (entry && (!host || entry.host === host)) this.hosts.delete(sessionId)
     for (const script of this.workers.values()) {
       if (script.finalized) continue
+      if (sessionId !== undefined && script.sessionId !== sessionId) continue
+      if (host && script.host !== host) continue
       this.pushLog(script, 'error', reason)
       if (script.agent && this.notifyAgent) {
-        void this.notifyAgent(script.agent, `脚本沙箱进程崩溃，已停止所有脚本：${reason}`, false, script).catch(() => {})
+        void this.notifyAgent(script.agent, `脚本沙箱进程崩溃，已停止该会话的脚本：${reason}`, false, script).catch(() => {})
       }
       this.finalize(script, 'error', { error: `crashed: ${reason}` })
     }
@@ -225,7 +280,7 @@ export class ScriptManager {
         throttleMs: filter.throttleMs, maxEvents: filter.maxEvents,
         onEvent: (event) => {
           try {
-            this.host.post({ type: 'event', scriptId: script.id, localId: message.localId, json: JSON.stringify(event) })
+            this.hostForScript(script)?.post({ type: 'event', scriptId: script.id, localId: message.localId, json: JSON.stringify(event) })
           } catch { /* child gone */ }
         },
       })
@@ -233,7 +288,7 @@ export class ScriptManager {
     } catch (error) {
       this.pushLog(script, 'error', `subscribe failed: ${errorMessage(error)}`)
       try {
-        this.host.post({
+        this.hostForScript(script)?.post({
           type: 'event', scriptId: script.id, localId: message.localId,
           json: JSON.stringify({ type: 'subscription.error', message: errorMessage(error) }),
         })
@@ -282,7 +337,7 @@ export class ScriptManager {
   async onRpc(script, message) {
     const fail = (error) => {
       try {
-        this.host.post({
+        this.hostForScript(script)?.post({
           type: 'rpc-result', scriptId: script.id, id: message.id,
           ok: false, error: errorMessage(error).slice(0, 2000),
         })
@@ -301,7 +356,7 @@ export class ScriptManager {
       if (json !== undefined && json.length > MAX_RESULT_BYTES) {
         throw new Error('RPC result exceeds 2MB; narrow the request')
       }
-      this.host.post({ type: 'rpc-result', scriptId: script.id, id: message.id, ok: true, json })
+      this.hostForScript(script)?.post({ type: 'rpc-result', scriptId: script.id, id: message.id, ok: true, json })
     } catch (error) {
       fail(error)
     } finally {
@@ -313,6 +368,7 @@ export class ScriptManager {
     const sessionId = script.sessionId
     const source = { kind: 'script', name: script.name, id: script.id }
     const signal = this.scriptSignal(script)
+    const scoped = this.clientFor(sessionId)
     switch (method) {
       case 'mode':
         return { mode: await this.safety.getMode({ signal }) }
@@ -320,7 +376,7 @@ export class ScriptManager {
         return this.statusProvider ? await this.statusProvider({ sessionId }) : {}
       case 'devices': {
         const filter = args[0] || {}
-        const devices = await this.client.devices({ signal })
+        const devices = await scoped.devices({ signal })
         return (devices || []).filter((device) => (
           (filter.connected === undefined || device.connected === filter.connected)
           && (!filter.type || device.type === filter.type)
@@ -330,10 +386,10 @@ export class ScriptManager {
       case 'device': {
         const id = String(args[0] || '')
         if (!id) throw new Error('device id is required')
-        const device = await this.client.device(id, { signal })
+        const device = await scoped.device(id, { signal })
         const [typeConfig, monitor, ranges] = await Promise.all([
-          this.client.deviceTypeConfig(device.type, { signal }),
-          this.client.monitorData(id, { signal }),
+          scoped.deviceTypeConfig(device.type, { signal }),
+          scoped.monitorData(id, { signal }),
           this.safety.getRanges({ signal }),
         ])
         return { device, typeConfig, monitor, ranges }
@@ -349,8 +405,8 @@ export class ScriptManager {
       case 'operate': {
         const [deviceId, operation, params] = args
         if (!deviceId || !operation) throw new Error('deviceId and operation are required')
-        const device = await this.client.device(String(deviceId), { signal })
-        const typeConfig = await this.client.deviceTypeConfig(device.type, { signal })
+        const device = await scoped.device(String(deviceId), { signal })
+        const typeConfig = await scoped.deviceTypeConfig(device.type, { signal })
         const definition = (typeConfig?.operations || []).find((item) => item.key === operation)
         return this.safety.operate({
           sessionId, source, deviceId: String(deviceId), operation: String(operation),
@@ -358,11 +414,11 @@ export class ScriptManager {
         })
       }
       case 'game.list':
-        return this.client.games({ signal })
+        return scoped.games({ signal })
       case 'game.status':
         return {
-          game: await this.client.gameStatus({ signal }),
-          runtime: await this.client.gameRuntimeStatus({ signal }),
+          game: await scoped.gameStatus({ signal }),
+          runtime: await scoped.gameRuntimeStatus({ signal }),
         }
       case 'game.start':
         return this.safety.gameStart({
@@ -385,17 +441,17 @@ export class ScriptManager {
       case 'game.stop':
         return this.safety.gameStop({ sessionId, source, reason: 'script-stop', signal })
       case 'client.state':
-        return this.client.clientState({ signal })
+        return scoped.clientState({ signal })
       case 'client.routes':
-        return this.client.clientRoutes({ signal })
+        return scoped.clientRoutes({ signal })
       case 'client.window':
         this.safety.assertActive()
-        return this.client.clientWindow(String(args[0] || ''), { signal })
+        return scoped.clientWindow(String(args[0] || ''), { signal })
       case 'client.navigate':
         this.safety.assertActive()
-        return this.client.clientNavigate(String(args[0] || ''), args[1] !== false, { signal })
+        return scoped.clientNavigate(String(args[0] || ''), args[1] !== false, { signal })
       case 'client.screenshot': {
-        const shot = await this.client.clientScreenshot(args[0] || {}, { signal })
+        const shot = await scoped.clientScreenshot(args[0] || {}, { signal })
         if (!shot) return shot
         const { data, ...meta } = shot
         return { ...meta, bytes: typeof data === 'string' ? Math.floor(data.length * 0.75) : meta.bytes }
@@ -429,8 +485,12 @@ export class ScriptManager {
     try { script.abort.abort(new Error('script finalized')) } catch { /* already aborted */ }
     for (const subscriptionId of script.subscriptions.values()) this.events.unsubscribe(subscriptionId)
     script.subscriptions.clear()
-    this.host.post({ type: 'shutdown', scriptId: script.id, reason: status })
+    this.hostForScript(script)?.post({ type: 'shutdown', scriptId: script.id, reason: status })
     if (this.workers.size <= 1) this.stopMonitor()
+    if (!this.sharedSandbox) {
+      const timer = this.clock.setTimeout(() => this.releaseHostIfIdle(script.sessionId), 0)
+      timer?.unref?.()
+    }
     this.audit.record({
       sessionId: script.sessionId, source: { kind: 'script', name: script.name, id: script.id },
       action: 'script.end',
@@ -439,14 +499,15 @@ export class ScriptManager {
     void this.savePersisted()
   }
 
-  /** Gracefully stop one script. */
-  stop(id, reason = 'script_stop') {
+  /** Gracefully stop one script; a caller session may only stop its own. */
+  stop(id, reason = 'script_stop', { sessionId } = {}) {
     const script = this.workers.get(id)
     if (!script) return false
+    if (sessionId !== undefined && script.sessionId !== sessionId) return false
     if (script.finalized) return true
     script.stoppedByUser = true
     try { script.abort.abort(new Error(reason)) } catch { /* already aborted */ }
-    this.host.post({ type: 'shutdown', scriptId: id, reason })
+    this.hostForScript(script)?.post({ type: 'shutdown', scriptId: id, reason })
     const timer = this.clock.setTimeout(() => {
       if (!script.finalized) this.finalize(script, 'stopped', { reason })
     }, 500)
@@ -465,7 +526,7 @@ export class ScriptManager {
     for (const script of targets) {
       if (explicit) script.stoppedByUser = true
       try { script.abort.abort(new Error(reason)) } catch { /* already aborted */ }
-      this.host.post({ type: 'shutdown', scriptId: script.id, reason })
+      this.hostForScript(script)?.post({ type: 'shutdown', scriptId: script.id, reason })
     }
     if (targets.length > 0) {
       const ids = new Set(targets.map((script) => script.id))
@@ -489,9 +550,10 @@ export class ScriptManager {
       .map((script) => scriptSummary(script, { includeCode }))
   }
 
-  logs(id, limit = 100) {
+  logs(id, limit = 100, { sessionId } = {}) {
     const script = this.workers.get(id)
     if (!script) return null
+    if (sessionId !== undefined && script.sessionId !== sessionId) return null
     return {
       id: script.id, status: script.status,
       logs: script.logs.slice(-Math.max(1, Math.min(500, limit))),
@@ -507,14 +569,26 @@ export class ScriptManager {
       ))
       if (stale.length === 0) return
       const reason = `sandbox blocked (no heartbeat for ${this.limits.heartbeatTimeoutMs}ms); restarted`
-      this.host.kill('script-stalled')
-      for (const script of this.workers.values()) {
+      const sessions = new Set(stale.map((script) => script.sessionId))
+      const hosts = new Set()
+      for (const script of stale) {
+        const host = this.hostForScript(script)
+        if (host && !hosts.has(host)) { hosts.add(host); host.kill('script-stalled') }
+      }
+      for (const script of stale) {
         if (script.finalized) continue
         this.pushLog(script, 'error', reason)
         if (script.agent && this.notifyAgent) {
-          void this.notifyAgent(script.agent, `脚本沙箱无响应，已重启并停止所有脚本：${reason}`, false, script).catch(() => {})
+          void this.notifyAgent(script.agent, `脚本沙箱无响应，已重启并停止该会话的脚本：${reason}`, false, script).catch(() => {})
         }
         this.finalize(script, 'error', { error: reason })
+      }
+      if (this.sharedSandbox) {
+        // The shared child is reused by every session; make sure no stale entry lingers.
+        for (const script of this.workers.values()) {
+          if (script.finalized || sessions.has(script.sessionId)) continue
+          if (now - script.lastHeartbeat > this.limits.heartbeatTimeoutMs) this.finalize(script, 'error', { error: reason })
+        }
       }
     }, 500)
     this.monitor?.unref?.()
@@ -572,17 +646,19 @@ export class ScriptManager {
     return started
   }
 
-  /** Terminate every script and the shared sandbox child (plugin dispose). */
+  /** Terminate every script and every sandbox child (plugin dispose). */
   dispose() {
     for (const script of this.workers.values()) {
       script.finalized = true
       try { script.abort.abort(new Error('plugin disposed')) } catch { /* already aborted */ }
       if (script.notifyTimer) this.clock.clearTimeout(script.notifyTimer)
       script.notifyTimer = null
-      this.host.post({ type: 'shutdown', scriptId: script.id, reason: 'dispose' })
+      this.hostForScript(script)?.post({ type: 'shutdown', scriptId: script.id, reason: 'dispose' })
     }
     this.stopMonitor()
     this.workers.clear()
-    this.host.dispose()
+    for (const entry of this.hosts.values()) entry.host.dispose()
+    this.hosts.clear()
+    this.sharedSandbox?.dispose()
   }
 }

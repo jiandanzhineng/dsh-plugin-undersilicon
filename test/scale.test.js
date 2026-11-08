@@ -138,7 +138,8 @@ test('extractApiRanges reads actionParams and drops config-only fields', () => {
   assert.equal(extracted.strength.set.value.max, 255)
   assert.equal(extracted.reporting, undefined)
   assert.equal(extracted.pump.start.rate.max, 255)
-  assert.equal(extracted.pump.start.ss.max, 255)
+  // pump.ss is seconds; the backend output guard hard-caps it at 60.
+  assert.equal(extracted.pump.start.ss.max, 60)
 })
 
 test('preset operations use the named capability or conservative field names', () => {

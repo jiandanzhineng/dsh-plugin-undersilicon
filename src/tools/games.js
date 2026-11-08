@@ -13,9 +13,10 @@ export function registerGameTools(ctx, deps) {
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
+      const scoped = client.forSession(sessionIdOf(exec))
       const [games, hostGames] = await Promise.all([
-        client.games({ signal: exec.signal }),
-        client.request('GET', '/game-runtime/games', { signal: exec.signal }).catch(() => []),
+        scoped.games({ signal: exec.signal }),
+        scoped.request('GET', '/game-runtime/games', { signal: exec.signal }).catch(() => []),
       ])
       const list = (games || []).map((game) => ({
         id: game.id, name: game.name || game.title, description: game.description,
@@ -34,10 +35,11 @@ export function registerGameTools(ctx, deps) {
     parameters: {},
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(_args, exec) {
+      const scoped = client.forSession(sessionIdOf(exec))
       const [game, runtime, clientState] = await Promise.all([
-        client.gameStatus({ signal: exec.signal }).catch((error) => ({ error: error.message })),
-        client.gameRuntimeStatus({ signal: exec.signal }).catch((error) => ({ error: error.message })),
-        client.clientState({ signal: exec.signal }).catch(() => null),
+        scoped.gameStatus({ signal: exec.signal }).catch((error) => ({ error: error.message })),
+        scoped.gameRuntimeStatus({ signal: exec.signal }).catch((error) => ({ error: error.message })),
+        scoped.clientState({ signal: exec.signal }).catch(() => null),
       ])
       return { mode: await safety.getMode(), game: compact(game, 30), runtime: compact(runtime, 30), client: compact(clientState, 20) }
     },
@@ -93,15 +95,23 @@ export function registerGameTools(ctx, deps) {
       if (args.action === 'params') {
         if (!args.params) throw new Error('params is required for action=params')
         const result = await safety.gameParams({ sessionId, source, params: args.params, signal: exec.signal })
-        const { _scaled, ...rest } = result
-        return { ...rest, scaledParameters: _scaled.parameters, clamped: _scaled.clamped, scaledFields: _scaled.scaledFields }
+        const { _scaled, _backendFieldCaps, ...rest } = result
+        return {
+          ...rest, scaledParameters: _scaled.parameters, clamped: _scaled.clamped,
+          scaledFields: _scaled.scaledFields,
+          ...(_backendFieldCaps ? { backendFieldCaps: _backendFieldCaps } : {}),
+        }
       }
       if (!args.actionName) throw new Error('actionName is required for action=action')
       const result = await safety.gameAction({
         sessionId, source, action: args.actionName, payload: args.payload || {}, signal: exec.signal,
       })
-      const { _scaled, ...rest } = result
-      return { ...rest, scaledParameters: _scaled.parameters, clamped: _scaled.clamped, scaledFields: _scaled.scaledFields }
+      const { _scaled, _backendFieldCaps, ...rest } = result
+      return {
+        ...rest, scaledParameters: _scaled.parameters, clamped: _scaled.clamped,
+        scaledFields: _scaled.scaledFields,
+        ...(_backendFieldCaps ? { backendFieldCaps: _backendFieldCaps } : {}),
+      }
     },
   }))
 }

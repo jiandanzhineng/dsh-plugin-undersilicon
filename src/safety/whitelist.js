@@ -59,10 +59,67 @@ const HINTS = [
   { re: /^\/games\/[^/]+$/, hint: 'game deletion is destructive; ask the user' },
 ]
 
+const READ_ROUTES = [
+  /^\/devices$/,
+  /^\/devices\/[^/]+$/,
+  /^\/devices\/[^/]+\/monitor-data$/,
+  /^\/device-capabilities$/,
+  /^\/device-types$/,
+  /^\/device-types\/configs$/,
+  /^\/device-types\/[^/]+\/config$/,
+  /^\/games$/,
+  /^\/games\/status$/,
+  /^\/games\/[^/]+$/,
+  /^\/games\/[^/]+\/meta$/,
+  /^\/game-runtime\/status$/,
+  /^\/game-runtime\/games$/,
+  /^\/client\/state$/,
+  /^\/client\/routes$/,
+  /^\/events\/recent$/,
+  /^\/remote-session\/status$/,
+  /^\/brands$/,
+  /^\/brands\/status$/,
+  /^\/brands\/v2-layout$/,
+  /^\/brands\/saved-ble$/,
+  /^\/voice\/status$/,
+  /^\/hello$/,
+]
+
+const READ_HINTS = [
+  { re: /^\/games\/external\//, hint: 'fetching external game metadata makes the backend request a URL (SSRF); use the registered game list instead' },
+  { re: /^\/brands\/discover/, hint: 'brand discovery probes the network; ask the user to scan in the client' },
+  { re: /^\/brands\/settings/, hint: 'brand settings are configuration, not agent data' },
+  { re: /^\/auth|^\/models/, hint: 'account/model state is outside the plugin contract' },
+  { re: /^\/logs/, hint: 'client log files may contain unrelated personal data' },
+  { re: /^\/test/, hint: 'the hardware test loop is outside the agent contract' },
+  { re: /^\/virtual-devices/, hint: 'virtual device injection is a local testing feature' },
+  { re: /^\/mqtt-client|^\/serial|^\/network/, hint: 'transport diagnostics are local-only' },
+  { re: /^\/events\/stream|^\/game-runtime\/stream/, hint: 'use events_subscribe or script_run for streaming reads' },
+  { re: /^\/agent-control/, hint: 'the plugin manages agent leases internally' },
+  { re: /^\/games\/[^/]+\/firmware|firmware/, hint: 'firmware access is local-only hardware control' },
+]
+
+/** Only these reads are exposed to an agent. Everything else is denied. */
+export function classifyRawRead(canonicalPath) {
+  const path = String(canonicalPath || '/')
+  if (/^\/games\/external(\/|$)/.test(path)) {
+    const hint = READ_HINTS[0].hint
+    throw new SafetyError(`blocked GET ${path}: ${hint}`, 'ENDPOINT_BLOCKED', {
+      method: 'GET', path, reason: 'read-not-whitelisted', hint,
+    })
+  }
+  if (READ_ROUTES.some((re) => re.test(path))) return { kind: 'read' }
+  const hint = READ_HINTS.find((item) => item.re.test(path))?.hint
+    || 'this read endpoint is not on the agent whitelist; use a documented tool instead'
+  throw new SafetyError(`blocked GET ${path}: ${hint}`, 'ENDPOINT_BLOCKED', {
+    method: 'GET', path, reason: 'read-not-whitelisted', hint,
+  })
+}
+
 /** Throw unless this write verb+path is on the explicit whitelist. */
 export function classifyRawWrite(method, canonicalPath) {
   const verb = String(method || 'GET').toUpperCase()
-  if (verb === 'GET' || verb === 'HEAD') return { kind: 'read' }
+  if (verb === 'GET' || verb === 'HEAD') return classifyRawRead(canonicalPath)
   const path = String(canonicalPath || '/')
   for (const route of ROUTES) {
     if (!route.re.test(path)) continue

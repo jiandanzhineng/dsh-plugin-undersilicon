@@ -1,5 +1,6 @@
 import { PanelHttp } from '../util/http.js'
 import { UsApiError } from '../util/errors.js'
+import { watchdogClientId } from '../safety/watchdog.js'
 
 /** Classify the control-panel session into the modes the safety layer cares about. */
 export function classifyMode(status) {
@@ -20,18 +21,39 @@ export function isRemoteOperatorMode(status) {
  * Endpoint contracts live in the main repo; this class adds no policy.
  */
 export class ControlPanelClient {
-  constructor({ baseUrl, fetchImpl, timeoutMs } = {}) {
+  constructor({ baseUrl, fetchImpl, timeoutMs, agentClientId } = {}) {
     this.http = new PanelHttp({ baseUrl, fetchImpl, timeoutMs })
     this.lastMode = 'unknown'
     this.lastStatus = null
+    this.agentClientId = agentClientId || null
+    this.sessionClients = null
   }
 
   get baseUrl() {
     return this.http.baseUrl
   }
 
+  /** One request context that tags every call with this session's agent id. */
+  forSession(sessionId) {
+    if (!sessionId) return this
+    const clientId = watchdogClientId(sessionId)
+    this.sessionClients ??= new Map()
+    let scoped = this.sessionClients.get(clientId)
+    if (!scoped) {
+      // Prototype delegation keeps test/diagnostic method overrides intact while
+      // `request` sees the session's agentClientId through `this`.
+      scoped = Object.create(this)
+      scoped.agentClientId = clientId
+      scoped.sessionClients = null
+      this.sessionClients.set(clientId, scoped)
+    }
+    return scoped
+  }
+
   request(method, path, options) {
-    return this.http.request(method, path, options)
+    const clientId = options?.agentClientId || this.agentClientId
+    const headers = clientId ? { 'x-agent-client': clientId } : {}
+    return this.http.request(method, path, { ...options, headers: { ...headers, ...(options?.headers || {}) } })
   }
 
   raw(method, path, options) {
@@ -97,6 +119,18 @@ export class ControlPanelClient {
 
   async watchdogHeartbeat(clientId, ttlSeconds, { signal } = {}) {
     return this.request('POST', '/device-watchdog/heartbeat', { body: { clientId, ttlSeconds }, signal })
+  }
+
+  async agentLeaseCreate(clientId, ttlSec, limits, { signal } = {}) {
+    return this.request('POST', '/agent-control/lease', { body: { clientId, ttlSec, limits }, signal })
+  }
+
+  async agentLeaseRelease(clientId, { signal } = {}) {
+    return this.request('DELETE', `/agent-control/lease/${encodeURIComponent(clientId)}`, { signal })
+  }
+
+  async agentLeaseStatus({ signal } = {}) {
+    return this.request('GET', '/agent-control/status', { signal })
   }
 
   async stopAll(clientId, reason, { signal } = {}) {

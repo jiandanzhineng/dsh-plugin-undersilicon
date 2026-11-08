@@ -15,7 +15,7 @@ DeepSeek Harness (dsh) 插件，让 agent 检查/控制本机「硅基之下控�
 - `src/sdk/`：HTTP 客户端（loopback 校验）、SSE 事件流、模式识别。
 - `src/safety/`：百分比缩放（只作用于强度字段）、看门狗、急停、审计、原始请求拦截。
 - `src/tools/`：7 个文件共 20 个 tool。
-- `src/scripts/`：`worker_threads` + `vm` 沙箱与脚本管理。
+- `src/scripts/`：每会话一个子进程 + 每脚本一个 `vm` context 的沙箱与脚本管理。
 - `src/events/`：共享 SSE 流、过滤/节流、inject/wake 投递。
 - `client/`：手写 `window.__ModuleLoader__` 前端 bundle（右侧栏页签）。
 - `mock/`：本地 mock 后端（单测与 headless 验证用）。

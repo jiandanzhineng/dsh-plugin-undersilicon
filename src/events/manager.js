@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { streamEvents } from '../sdk/events-stream.js'
 import { errorMessage } from '../util/errors.js'
+import { watchdogClientId } from '../safety/watchdog.js'
 
 const MAX_RING = 200
 
@@ -93,6 +94,7 @@ export class EventManager {
   limits() {
     return {
       maxSubscriptions: Math.max(1, Number(this.config?.events?.maxSubscriptions ?? 20)),
+      maxTotalSubscriptions: Math.max(1, Number(this.config?.events?.maxTotalSubscriptions ?? 64)),
       minThrottleMs: Math.max(500, Number(this.config?.events?.minThrottleMs ?? 500)),
       defaultThrottleMs: Math.max(500, Number(this.config?.events?.defaultThrottleMs ?? 1000)),
       defaultMaxEvents: Math.max(1, Number(this.config?.events?.maxEvents ?? 50)),
@@ -119,13 +121,15 @@ export class EventManager {
   /** Add a subscription and make sure the shared stream is running. */
   subscribe(options) {
     const limits = this.limits()
-    if (this.subscriptions.size >= limits.maxSubscriptions) {
-      throw new Error(`too many event subscriptions (max ${limits.maxSubscriptions}); unsubscribe one first`)
+    if (this.subscriptions.size >= limits.maxTotalSubscriptions) {
+      throw new Error(`too many event subscriptions in this plugin (max ${limits.maxTotalSubscriptions}); unsubscribe one first`)
     }
     const ownerId = options.ownerId
     if (ownerId !== undefined) {
       const owned = [...this.subscriptions.values()].filter((item) => item.ownerId === ownerId).length
-      if (owned >= 20) throw new Error('this session already has 20 subscriptions; cancel one before adding another')
+      if (owned >= limits.maxSubscriptions) {
+        throw new Error(`this session already has ${limits.maxSubscriptions} subscriptions; cancel one before adding another`)
+      }
     }
     const rawThrottle = options.throttleMs === undefined ? limits.defaultThrottleMs : Number(options.throttleMs)
     if (!Number.isFinite(rawThrottle)) throw new Error('throttleMs must be a finite number between 500 and 3600000')
@@ -160,10 +164,11 @@ export class EventManager {
     return this.describe(subscription)
   }
 
-  /** Remove one subscription; the shared stream stops when nothing needs it. */
-  unsubscribe(id) {
+  /** Remove one subscription; a caller session may only remove its own. */
+  unsubscribe(id, { ownerId } = {}) {
     const subscription = this.subscriptions.get(id)
     if (!subscription) return false
+    if (ownerId !== undefined && subscription.ownerId !== ownerId) return false
     if (subscription.timer) this.clock.clearTimeout(subscription.timer)
     this.subscriptions.delete(id)
     if (!this.shouldStream()) this.stopStream()
@@ -196,8 +201,10 @@ export class EventManager {
     return out
   }
 
-  list() {
-    return [...this.subscriptions.values()].map((item) => this.describe(item))
+  list({ ownerId } = {}) {
+    return [...this.subscriptions.values()]
+      .filter((item) => ownerId === undefined || item.ownerId === ownerId)
+      .map((item) => this.describe(item))
   }
 
   /** Recent events (ring buffer; falls back to the backend when empty). */
@@ -337,8 +344,10 @@ export class EventManager {
       // local in dispatch(), which already matches each subscription.
       try {
         this.state.status = this.state.connected ? 'connected' : 'connecting'
+        const owner = [...this.subscriptions.values()].find((item) => item.ownerId)?.ownerId
         const outcome = await streamEvents({
           baseUrl: this.client.baseUrl,
+          agentClientId: owner ? watchdogClientId(owner) : undefined,
           lastEventId: this.lastSeq,
           signal: controller.signal,
           onHello: (hello) => {

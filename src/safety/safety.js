@@ -40,11 +40,13 @@ function pathParts(sendPath) {
 
 /** One request through the safety layer. */
 export class SafetyLayer {
-  constructor({ client, config, audit, watchdog, log = () => {}, clock = globalThis } = {}) {
+  constructor({ client, config, audit, watchdog, lease, log = () => {}, clock = globalThis } = {}) {
     this.client = client
     this.config = config
     this.audit = audit
     this.watchdog = watchdog
+    this.lease = lease || null
+    this.hooks = {}
     this.log = log
     this.clock = clock
     this.apiRanges = null
@@ -61,6 +63,17 @@ export class SafetyLayer {
 
   get limits() {
     return this.config?.limits || {}
+  }
+
+  /** A client that tags every request with this session's agent lease id. */
+  clientFor(sessionId) {
+    if (sessionId && typeof this.client.forSession === 'function') return this.client.forSession(sessionId)
+    return this.client
+  }
+
+  /** Register the full emergency-stop side effects (scripts/subscriptions/watchdog). */
+  setEmergencyHooks(hooks = {}) {
+    this.hooks = hooks || {}
   }
 
   /** Refresh and cache the remote-session mode. */
@@ -132,8 +145,8 @@ export class SafetyLayer {
   assertActive() {
     if (this.latch) {
       throw new SafetyError(
-        'the user pressed the sidebar emergency stop and the plugin is latched; ' +
-        'ask the user to click "resume" in the sidebar before any control can be sent',
+        '用户在侧栏按了急停，插件已锁定，所有控制都会被拒绝；必须请用户在面板点「恢复」后才能继续。' +
+        ' The user pressed the sidebar emergency stop, so the plugin is latched; ask the user to click "resume" in the panel before any control can be sent.',
         'EMERGENCY_LATCHED',
         { latchedAt: this.latch.at, reason: this.latch.reason },
       )
@@ -216,9 +229,53 @@ export class SafetyLayer {
       return { ...result, disabled: true }
     }
     throw new SafetyError(
-      `device watchdog lease is unavailable, refusing to send a control command: ${result?.error || result?.code || 'unknown error'}`,
+      `设备看门狗租约不可用，已拒绝下发：${result?.error || result?.code || 'unknown error'}。` +
+      ` The device watchdog lease is unavailable, so the control command was not sent.`,
       'WATCHDOG_UNAVAILABLE', result || {},
     )
+  }
+
+  /**
+   * Renew both leases before a device write. The device watchdog is a local
+   * crash guard; the agent lease is the backend output-clamp contract, so it is
+   * also required in remote modes where the watchdog answers 423.
+   */
+  async ensureControl(sessionId, { signal, epoch, reason = 'agent-control' } = {}) {
+    if (epoch !== undefined) this.assertEpoch(epoch)
+    const watchdog = await this.ensureWatchdog(sessionId, { signal, epoch, reason })
+    if (epoch !== undefined) this.assertEpoch(epoch)
+    let lease = { ok: true, disabled: true }
+    if (this.lease && sessionId) {
+      try {
+        lease = await this.lease.ensure(sessionId, { reason, signal })
+      } catch (error) {
+        // A concurrent emergency stop aborts the lease request; report that,
+        // not a misleading lease-unavailable error.
+        if (epoch !== undefined) this.assertEpoch(epoch)
+        throw error
+      }
+      if (epoch !== undefined) this.assertEpoch(epoch)
+    }
+    return { watchdog, lease }
+  }
+
+  /** A 428 means the backend lease lapsed; recreate it once and retry. */
+  async withLeaseRetry(sessionId, fn, { signal } = {}) {
+    try {
+      return await fn()
+    } catch (error) {
+      if (!this.lease || !sessionId || !(error?.status === 428 || error?.code === 'AGENT_LEASE_REQUIRED')) throw error
+      await this.lease.ensure(sessionId, { reason: 'lease-428-retry', signal })
+      return fn()
+    }
+  }
+
+  runEmergencyHooks(reason, sessionId) {
+    try { this.hooks.stopScripts?.(reason) } catch (error) { this.log('emergency script stop failed', { error: error?.message }) }
+    try { this.hooks.stopSubscriptions?.(reason) } catch (error) { this.log('emergency subscription stop failed', { error: error?.message }) }
+    if (sessionId) {
+      try { this.hooks.stopWatchdog?.(sessionId) } catch (error) { this.log('emergency watchdog stop failed', { error: error?.message }) }
+    }
   }
 
   // ---------- device control ----------
@@ -230,17 +287,28 @@ export class SafetyLayer {
     let scaled
     try {
       const ranges = await this.getRanges({ signal: scope.signal })
+      const sessionClient = this.clientFor(sessionId)
+      let deviceType
+      if (String(capability).toLowerCase() === 'motors') {
+        const device = await sessionClient.device(deviceId, { signal: scope.signal })
+        deviceType = device?.type
+      }
       scaled = scaleCapabilityInput({
-        capability, action, input, limits: this.limits, ranges,
+        capability, action, input, limits: this.limits, ranges, deviceType,
       })
       this.assertEpoch(scope.epoch)
       this.assertActive()
-      await this.ensureWatchdog(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: `control:${capability}.${action}` })
+      await this.ensureControl(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: `control:${capability}.${action}` })
       this.assertEpoch(scope.epoch)
       this.assertActive()
-      const result = await this.client.control(deviceId, capability, action, scaled.input, { signal: scope.signal })
+      const result = await this.withLeaseRetry(
+        sessionId,
+        () => sessionClient.control(deviceId, capability, action, scaled.input, { signal: scope.signal }),
+        { signal: scope.signal },
+      )
       outcome = { ok: true, status: 200, result }
-      return { ...result, _scaled: scaled, _mode: await this.getMode() }
+      const fieldCaps = this.lease?.fieldCapsFor?.(sessionId)
+      return { ...result, _scaled: scaled, _mode: await this.getMode(), ...(fieldCaps ? { _backendFieldCaps: fieldCaps } : {}) }
     } catch (error) {
       outcome = { ok: false, status: error?.status || 0, code: error?.code, message: error?.message }
       throw error
@@ -270,23 +338,47 @@ export class SafetyLayer {
     if (policy.mode === 'translate') {
       const started = Date.now()
       const results = []
+      const sent = []
+      let compensated = []
       try {
-        for (const item of policy.actions) {
-          const result = await this.control({
-            sessionId, source, deviceId, capability: item.capability,
-            action: item.action, input: item.input, signal, epoch: captured,
-          })
-          results.push({ capability: item.capability, action: item.action, result })
+        const ranges = await this.getRanges({ signal })
+        // Prepare every action first: a bad second action must not send the first.
+        const prepared = policy.actions.map((item) => ({
+          item,
+          scaled: scaleCapabilityInput({
+            capability: item.capability, action: item.action, input: item.input, limits: this.limits, ranges,
+          }),
+        }))
+        this.assertEpoch(captured)
+        this.assertActive()
+        await this.ensureControl(sessionId, { signal, epoch: captured, reason: `operation:${operation}` })
+        this.assertEpoch(captured)
+        const sessionClient = this.clientFor(sessionId)
+        for (const { item, scaled } of prepared) {
+          this.assertEpoch(captured)
+          this.assertActive()
+          const result = await this.withLeaseRetry(
+            sessionId,
+            () => sessionClient.control(deviceId, item.capability, item.action, scaled.input, { signal }),
+            { signal },
+          )
+          sent.push({ capability: item.capability, action: item.action })
+          results.push({ capability: item.capability, action: item.action, result, scaled })
         }
         return {
           ok: true, translated: true, actions: results.map((item) => `${item.capability}.${item.action}`),
           results, _mode: await this.getMode(),
+          ...(this.lease?.fieldCapsFor?.(sessionId) ? { _backendFieldCaps: this.lease.fieldCapsFor(sessionId) } : {}),
         }
+      } catch (error) {
+        compensated = await this.compensateStops(deviceId, sent, sessionId)
+        error.details = { ...(error.details || {}), compensatingStops: compensated }
+        throw error
       } finally {
         this.audit.record({
           sessionId, source, action: auditAction, method: 'POST',
           request: { deviceId, operation, params, translated: policy.actions },
-          result: { ok: results.length === policy.actions.length }, durationMs: Date.now() - started,
+          result: { ok: results.length === policy.actions.length, compensatingStops: compensated }, durationMs: Date.now() - started,
         })
       }
     }
@@ -303,16 +395,22 @@ export class SafetyLayer {
       } else {
         const ranges = await this.getRanges({ signal: scope.signal })
         scaled = scaleOperationInput({
-          operation: definition || { key: operation }, input: merged, limits: this.limits, ranges,
+          operation: definition || { key: operation }, input: merged, limits: this.limits, ranges, deviceType,
         })
       }
       this.assertEpoch(scope.epoch)
       this.assertActive()
-      await this.ensureWatchdog(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: `operation:${operation}` })
+      await this.ensureControl(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: `operation:${operation}` })
       this.assertEpoch(scope.epoch)
-      const result = await this.client.operate(deviceId, operation, scaled.input, { signal: scope.signal })
+      const sessionClient = this.clientFor(sessionId)
+      const result = await this.withLeaseRetry(
+        sessionId,
+        () => sessionClient.operate(deviceId, operation, scaled.input, { signal: scope.signal }),
+        { signal: scope.signal },
+      )
       outcome = { ok: true, status: 200, result }
-      return { ...result, _scaled: scaled, _mode: await this.getMode() }
+      const fieldCaps = this.lease?.fieldCapsFor?.(sessionId)
+      return { ...result, _scaled: scaled, _mode: await this.getMode(), ...(fieldCaps ? { _backendFieldCaps: fieldCaps } : {}) }
     } catch (error) {
       outcome = { ok: false, status: error?.status || 0, code: error?.code, message: error?.message }
       throw error
@@ -327,6 +425,22 @@ export class SafetyLayer {
     }
   }
 
+  /** After a partial translated operation, stop every capability already sent. */
+  async compensateStops(deviceId, sent, sessionId) {
+    const stopped = []
+    if (sent.length === 0) return stopped
+    const sessionClient = this.clientFor(sessionId)
+    for (const action of [...sent].reverse()) {
+      try {
+        await sessionClient.control(deviceId, action.capability, 'stop', {}, { signal: AbortSignal.timeout(3000) })
+        stopped.push(action.capability)
+      } catch (error) {
+        this.log('compensating stop failed', { deviceId, capability: action.capability, error: error?.message })
+      }
+    }
+    return stopped
+  }
+
   async operate({ sessionId, source, deviceId, operation, params, definition, deviceType, signal }) {
     return this.executeOperation({
       sessionId, source, deviceId, operation, params, definition, deviceType, signal,
@@ -339,35 +453,36 @@ export class SafetyLayer {
     const normalized = normalizeRequestPath(path, { baseUrl: this.client.baseUrl })
     const info = classifyRawWrite(method, normalized.matchPath)
     const verb = String(method || 'GET').toUpperCase()
+    const payloadBody = body === null ? undefined : body
     const mergedQuery = { ...normalized.query, ...queryObject(new URLSearchParams(), query) }
     if (info.kind === 'read') {
-      return this.client.request(verb, normalized.sendPath, { body, query: mergedQuery, signal })
+      return this.clientFor(sessionId).request(verb, normalized.sendPath, { query: mergedQuery, signal })
     }
     if (info.kind === 'remote-emergency') {
       return this.emergencyStop({ sessionId, source, reason: 'raw remote emergency stop', signal })
     }
     if (info.kind === 'stop-all') {
-      const payload = body === undefined ? {} : bodyObject(body)
-      const clientId = typeof payload.clientId === 'string' ? payload.clientId : 'dsh-raw'
-      return this.auditedRequest({
-        sessionId, source, verb, path: normalized.sendPath,
-        body: { clientId, reason: payload.reason }, query: mergedQuery, signal, allowLatched: true,
-      })
+      const payload = payloadBody === undefined ? {} : bodyObject(payloadBody)
+      const reason = typeof payload.reason === 'string' ? payload.reason : 'raw stop-all'
+      return this.emergencyStop({ sessionId, source, reason, signal })
     }
     const parts = pathParts(normalized.sendPath)
-    if (info.kind === 'capability') return this.rawCapability({ sessionId, source, parts, body, query: mergedQuery, signal })
-    if (info.kind === 'operation') return this.rawOperation({ sessionId, source, parts, body, query: mergedQuery, signal })
+    if (info.kind === 'capability') return this.rawCapability({ sessionId, source, parts, body: payloadBody, query: mergedQuery, signal })
+    if (info.kind === 'operation') return this.rawOperation({ sessionId, source, parts, body: payloadBody, query: mergedQuery, signal })
     if (info.kind === 'device-patch') {
-      const patch = assertPatchBody(body)
-      return this.auditedRequest({ sessionId, source, verb: 'PATCH', path: normalized.sendPath, body: patch, query: mergedQuery, signal })
+      const patch = assertPatchBody(payloadBody)
+      await this.ensureControl(sessionId, { signal, reason: 'raw-device-patch' })
+      return this.auditedRequest({ sessionId, source, verb: 'PATCH', path: normalized.sendPath, body: patch, query: mergedQuery, signal, deviceWrite: true })
     }
     if (info.kind === 'nickname') {
-      return this.auditedRequest({ sessionId, source, verb: 'POST', path: normalized.sendPath, body: assertNicknameBody(body), query: mergedQuery, signal })
+      await this.ensureControl(sessionId, { signal, reason: 'raw-nickname' })
+      return this.auditedRequest({ sessionId, source, verb: 'POST', path: normalized.sendPath, body: assertNicknameBody(payloadBody), query: mergedQuery, signal, deviceWrite: true })
     }
     if (info.kind === 'connection') {
-      return this.auditedRequest({ sessionId, source, verb: 'PUT', path: normalized.sendPath, body: assertConnectionBody(body), query: mergedQuery, signal })
+      await this.ensureControl(sessionId, { signal, reason: 'raw-connection' })
+      return this.auditedRequest({ sessionId, source, verb: 'PUT', path: normalized.sendPath, body: assertConnectionBody(payloadBody), query: mergedQuery, signal, deviceWrite: true })
     }
-    if (info.kind === 'client') return this.rawClient({ sessionId, source, parts, body, query: mergedQuery, signal })
+    if (info.kind === 'client') return this.rawClient({ sessionId, source, parts, body: payloadBody, query: mergedQuery, signal })
     if (info.kind === 'game-start') return this.rawGameStart({ sessionId, source, parts, body, signal })
     if (info.kind === 'game-runtime-start') return this.rawGameRuntimeStart({ sessionId, source, body, signal })
     if (info.kind === 'game-runtime-params') {
@@ -446,14 +561,17 @@ export class SafetyLayer {
       scaled = scaleCapabilityInput({ capability, action, input: rawInput, limits: this.limits, ranges })
       this.assertEpoch(scope.epoch)
       this.assertActive()
-      await this.ensureWatchdog(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'raw-capability' })
+      await this.ensureControl(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'raw-capability' })
       this.assertEpoch(scope.epoch)
       const sendPath = `/${parts.map(encodeURIComponent).join('/')}`
-      const result = await this.client.request('POST', sendPath, {
-        body: { input: scaled.input }, query, signal: scope.signal,
-      })
-      outcome = { ok: true, status: 200 }
-      return { ...result, _scaled: scaled }
+      const sessionClient = this.clientFor(sessionId)
+      const result = await this.withLeaseRetry(
+        sessionId,
+        () => sessionClient.request('POST', sendPath, { body: { input: scaled.input }, query, signal: scope.signal }),
+        { signal: scope.signal },
+      )
+      outcome = { ok: true, status: 200, result }
+      return { ...result, _scaled: scaled, ...(this.lease?.fieldCapsFor?.(sessionId) ? { _backendFieldCaps: this.lease.fieldCapsFor(sessionId) } : {}) }
     } catch (error) {
       outcome = { ok: false, status: error?.status || 0, code: error?.code, message: error?.message }
       throw error
@@ -519,14 +637,16 @@ export class SafetyLayer {
     })
   }
 
-  async auditedRequest({ sessionId, source, verb, path, body, query, signal, allowLatched = false }) {
+  async auditedRequest({ sessionId, source, verb, path, body, query, signal, allowLatched = false, deviceWrite = false }) {
     const scope = this.begin({ sessionId, source, signal, allowLatched })
     const started = Date.now()
     let outcome
     try {
       this.assertEpoch(scope.epoch)
       if (!allowLatched) this.assertActive()
-      const result = await this.client.request(verb, path, { body, query, signal: scope.signal })
+      const sessionClient = this.clientFor(sessionId)
+      const send = () => sessionClient.request(verb, path, { body, query, signal: scope.signal })
+      const result = deviceWrite ? await this.withLeaseRetry(sessionId, send, { signal: scope.signal }) : await send()
       outcome = { ok: true, status: 200 }
       return result
     } catch (error) {
@@ -577,20 +697,22 @@ export class SafetyLayer {
     let scaled
     try {
       if (!gameId) throw new SafetyError('gameId is required', 'INVALID_GAME')
-      await this.ensureWatchdog(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'game-start' })
+      await this.ensureControl(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'game-start' })
       this.assertEpoch(scope.epoch)
       this.assertActive()
       scaled = await this.scaleGameParameters(gameId, parameters || {}, scope.signal)
       this.assertEpoch(scope.epoch)
-      const result = launch
-        ? await this.client.launchClientGame(gameId, {
+      const sessionClient = this.clientFor(sessionId)
+      const send = () => launch
+        ? sessionClient.launchClientGame(gameId, {
           deviceMap: deviceMapping, parameters: scaled.parameters, show: show !== false,
         }, { signal: scope.signal })
-        : await this.client.startGame(gameId, {
+        : sessionClient.startGame(gameId, {
           deviceMapping, parameters: scaled.parameters,
         }, { signal: scope.signal })
+      const result = await this.withLeaseRetry(sessionId, send, { signal: scope.signal })
       outcome = { ok: true, status: 200, result }
-      return { ...result, _scaled: scaled }
+      return { ...result, _scaled: scaled, ...(this.lease?.fieldCapsFor?.(sessionId) ? { _backendFieldCaps: this.lease.fieldCapsFor(sessionId) } : {}) }
     } catch (error) {
       outcome = { ok: false, status: error?.status || 0, code: error?.code, message: error?.message }
       throw error
@@ -611,13 +733,18 @@ export class SafetyLayer {
     let outcome
     let scaled
     try {
-      await this.ensureWatchdog(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'game-params' })
+      await this.ensureControl(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'game-params' })
       const id = gameId || await this.currentGameId(scope.signal)
       scaled = await this.scaleGameParameters(id, params || {}, scope.signal)
       this.assertEpoch(scope.epoch)
-      const result = await this.client.gameRuntimeParams(scaled.parameters, { signal: scope.signal })
+      const sessionClient = this.clientFor(sessionId)
+      const result = await this.withLeaseRetry(
+        sessionId,
+        () => sessionClient.gameRuntimeParams(scaled.parameters, { signal: scope.signal }),
+        { signal: scope.signal },
+      )
       outcome = { ok: true, status: 200, result }
-      return { ...result, _scaled: scaled }
+      return { ...result, _scaled: scaled, ...(this.lease?.fieldCapsFor?.(sessionId) ? { _backendFieldCaps: this.lease.fieldCapsFor(sessionId) } : {}) }
     } catch (error) {
       outcome = { ok: false, status: error?.status || 0, code: error?.code, message: error?.message }
       throw error
@@ -639,13 +766,18 @@ export class SafetyLayer {
     let scaled
     try {
       if (!action) throw new SafetyError('game action is required', 'INVALID_GAME_ACTION')
-      await this.ensureWatchdog(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'game-action' })
+      await this.ensureControl(sessionId, { signal: scope.signal, epoch: scope.epoch, reason: 'game-action' })
       const id = gameId || await this.currentGameId(scope.signal)
       scaled = await this.scaleGameParameters(id, payload || {}, scope.signal)
       this.assertEpoch(scope.epoch)
-      const result = await this.client.gameRuntimeAction(action, scaled.parameters, { signal: scope.signal })
+      const sessionClient = this.clientFor(sessionId)
+      const result = await this.withLeaseRetry(
+        sessionId,
+        () => sessionClient.gameRuntimeAction(action, scaled.parameters, { signal: scope.signal }),
+        { signal: scope.signal },
+      )
       outcome = { ok: true, status: 200, result }
-      return { ...result, _scaled: scaled }
+      return { ...result, _scaled: scaled, ...(this.lease?.fieldCapsFor?.(sessionId) ? { _backendFieldCaps: this.lease.fieldCapsFor(sessionId) } : {}) }
     } catch (error) {
       outcome = { ok: false, status: error?.status || 0, code: error?.code, message: error?.message }
       throw error
@@ -672,9 +804,10 @@ export class SafetyLayer {
     const started = Date.now()
     let outcome
     try {
+      const sessionClient = this.clientFor(sessionId)
       const [current, runtime] = await Promise.allSettled([
-        this.client.stopCurrentGame({ signal: scope.signal }),
-        this.client.gameRuntimeStop(reason || 'agent-stop', { signal: scope.signal }),
+        sessionClient.stopCurrentGame({ signal: scope.signal }),
+        sessionClient.gameRuntimeStop(reason || 'agent-stop', { signal: scope.signal }),
       ])
       outcome = {
         ok: current.status === 'fulfilled' || runtime.status === 'fulfilled',
@@ -693,11 +826,13 @@ export class SafetyLayer {
 
   // ---------- emergency stop ----------
 
-  async emergencyStop({ sessionId, source, reason = 'agent-emergency-stop', signal, skipHalt = false } = {}) {
+  async emergencyStop({ sessionId, source, reason = 'agent-emergency-stop', signal, skipHalt = false, skipHooks = false } = {}) {
     if (!skipHalt) this.halt({ reason })
+    if (!skipHooks) this.runEmergencyHooks(reason, sessionId)
     await this.waitInFlight(SETTLE_MS)
     const started = Date.now()
     const mode = await this.refreshMode({ force: true })
+    const sessionClient = this.clientFor(sessionId)
     const results = []
     const run = async (name, fn, { required = true, benign = [] } = {}) => {
       let lastError
@@ -728,20 +863,20 @@ export class SafetyLayer {
     }
     let stopAllRemote = false
     if (mode === 'remote-operator') {
-      await run('remote-session/emergency-stop', () => this.client.emergencyStopRemote({ signal }))
+      await run('remote-session/emergency-stop', () => sessionClient.emergencyStopRemote({ signal }))
     } else {
       const clientId = watchdogClientId(sessionId)
-      const stopped = await run('device-watchdog/stop-all', () => this.client.stopAll(clientId, reason, { signal }))
+      const stopped = await run('device-watchdog/stop-all', () => sessionClient.stopAll(clientId, reason, { signal }))
       if (!stopped) {
         const last = results[results.length - 1]
         if (last?.status === 423 || last?.code === 'REMOTE_LOCKED') stopAllRemote = true
       }
     }
     if (stopAllRemote) {
-      await run('remote-session/emergency-stop', () => this.client.emergencyStopRemote({ signal }))
+      await run('remote-session/emergency-stop', () => sessionClient.emergencyStopRemote({ signal }))
     }
-    await run('games/stop-current', () => this.client.stopCurrentGame({ signal }), { benign: [404, 409] })
-    await run('game-runtime/stop', () => this.client.gameRuntimeStop(reason, { signal }), { benign: [404, 409] })
+    await run('games/stop-current', () => sessionClient.stopCurrentGame({ signal }), { benign: [404, 409] })
+    await run('game-runtime/stop', () => sessionClient.gameRuntimeStop(reason, { signal }), { benign: [404, 409] })
     const ok = results.every((item) => item.ok)
     this.audit.record({
       sessionId, source, action: 'emergency.stop', reason, mode,

@@ -65,8 +65,11 @@ export function registerEventTools(ctx, deps) {
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
-      if (args.subscriptionId) return { ok: events.unsubscribe(args.subscriptionId), subscriptionId: args.subscriptionId }
-      return { ok: true, removed: events.unsubscribeOwner(sessionIdOf(exec)) }
+      const ownerId = sessionIdOf(exec)
+      if (args.subscriptionId) {
+        return { ok: events.unsubscribe(args.subscriptionId, { ownerId }), subscriptionId: args.subscriptionId }
+      }
+      return { ok: true, removed: events.unsubscribeOwner(ownerId) }
     },
   }))
 

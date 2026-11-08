@@ -3,6 +3,22 @@
 const vm = require('node:vm')
 
 /**
+ * Network and host-realm escape hatches are removed before any script runs.
+ * The vm context is the only network boundary (Node's permission model does
+ * not cover net), so a script must never see these globals.
+ */
+const BLOCKED_GLOBALS = [
+  'fetch', 'WebSocket', 'WebSocketStream', 'EventSource', 'XMLHttpRequest',
+  'Request', 'Response', 'Headers', 'FormData', 'WebTransport', 'navigator', 'caches',
+]
+for (const name of BLOCKED_GLOBALS) {
+  try { delete globalThis[name] } catch { /* non-configurable */ }
+  try {
+    Object.defineProperty(globalThis, name, { value: undefined, writable: false, configurable: false })
+  } catch { /* best effort */ }
+}
+
+/**
  * Sandbox child. It is spawned with Node's permission model and only this file
  * is readable. Scripts get one vm context each; the host bridge lives in this
  * module's closure and is never exposed as a property of the context.
@@ -246,6 +262,12 @@ function runScript(message) {
     context.setInterval = script.api.timerApi.setInterval
     context.clearTimeout = script.api.timerApi.clearTimeout
     context.clearInterval = script.api.timerApi.clearInterval
+    for (const name of ['fetch', 'WebSocket', 'EventSource', 'XMLHttpRequest', 'navigator', 'Request', 'Response']) {
+      try { context[name] = undefined } catch { /* immutable global */ }
+    }
+    for (const name of ['fetch', 'WebSocket', 'EventSource', 'XMLHttpRequest']) {
+      if (typeof context[name] !== 'undefined') throw new Error(`${name} is reachable inside the script context`)
+    }
   } catch (error) {
     scripts.delete(scriptId)
     post({ type: 'result', scriptId, reason: 'error', error: `sandbox setup failed: ${textOf(error)}` })

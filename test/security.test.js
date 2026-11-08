@@ -121,7 +121,8 @@ test('pump.ss is scaled and integer caps floor instead of rounding up', async (t
     capability: 'pump', action: 'start', input: { rate: '255', ss: '255' },
   })
   assert.equal(result._scaled.input.rate, 153)
-  assert.equal(result._scaled.input.ss, 153)
+  // The backend output guard treats pump.ss as seconds capped at 60s, so 60% -> 36.
+  assert.equal(result._scaled.input.ss, 36)
   const floored = scaleCapabilityInput({
     capability: 'strength', action: 'set', input: { value: 255 },
     limits: { default: 30 }, ranges: mergeRanges({}),
@@ -194,7 +195,7 @@ test('raw operations merge defaults, translate invoke operations and reject unsa
     path: '/devices/enema-1/operations/pumpStart', body: { params: { rate: 255, ss: 255 } },
   })
   const pump = h.mock.state.requests.filter((request) => request.path.includes('/enema-1/capabilities/pump/actions/start')).at(-1)
-  assert.deepEqual(pump.body, { input: { rate: 153, ss: 153 } })
+  assert.deepEqual(pump.body, { input: { rate: 153, ss: 36 } })
 
   await assert.rejects(
     h.safety.raw({

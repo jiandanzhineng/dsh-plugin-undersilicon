@@ -12,6 +12,7 @@ export function createMockServer({ mode = 'local', clientAvailable = true } = {}
     requests: [],
     sse: new Set(),
     watchdog: new Map(),
+    leases: new Map(),
     route: '/devices',
     window: { visible: true, focused: true, minimized: false, maximized: false },
     game: null,
@@ -50,6 +51,43 @@ export function createMockServer({ mode = 'local', clientAvailable = true } = {}
     if (path === '/api/events/recent') {
       const limit = Number(url.searchParams.get('limit') || 100)
       return json(200, state.events.slice(-limit))
+    }
+    if (path === '/api/agent-control/lease' && req.method === 'POST') {
+      if (!body.clientId) return error(400, 'INVALID_CLIENT_ID', 'clientId required')
+      const limits = body.limits || {}
+      const fallback = Number(limits.default ?? 0)
+      const caps = limits.capabilities || {}
+      const percent = (name) => Math.max(0, Math.min(100, Number(caps[name] ?? fallback) || 0))
+      const fieldCaps = {
+        voltage: Math.floor(percent('shock')),
+        power: Math.floor((percent('strength') / 100) * 255),
+        intensity: Math.floor((Math.min(percent('shock'), percent('vibration'), percent('suction'), percent('estim')) / 100) * 100),
+        motorLevel: Math.floor((percent('motors') / 100) * 20),
+        stroke: Math.floor((percent('motors') / 100) * 40),
+        rate: Math.floor((percent('pump') / 100) * 255),
+        seconds: Math.floor((percent('pump') / 100) * 60),
+        ticks: Math.floor(percent('shock')),
+        pump: Math.floor((percent('pump') / 100) * 255),
+      }
+      state.leases.set(body.clientId, { limits, ttlSec: body.ttlSec, at: Date.now(), fieldCaps })
+      return json(200, {
+        ok: true, clientId: body.clientId, ttlSec: body.ttlSec,
+        expiresAt: new Date(Date.now() + (body.ttlSec || 30) * 1000).toISOString(),
+        limits, fieldCaps,
+      })
+    }
+    if (path.startsWith('/api/agent-control/lease/') && req.method === 'DELETE') {
+      const clientId = decodeURIComponent(path.slice('/api/agent-control/lease/'.length))
+      const released = state.leases.delete(clientId)
+      return json(200, { ok: true, clientId, released, stopped: [] })
+    }
+    if (path === '/api/agent-control/status') {
+      const leases = [...state.leases].map(([clientId, lease]) => ({
+        clientId, expiresAt: new Date(lease.at + (lease.ttlSec || 30) * 1000).toISOString(),
+        ttlRemainingSec: Math.max(0, Math.ceil(((lease.ttlSec || 30) * 1000 - (Date.now() - lease.at)) / 1000)),
+        limits: lease.limits, fieldCaps: lease.fieldCaps,
+      }))
+      return json(200, { active: leases.length > 0, leases })
     }
     if (path === '/api/remote-session/status') {
       if (state.mode === 'remote-operator') {

@@ -209,7 +209,9 @@ window.__ModuleLoader__.load({
       }
       let text = map[status] || t("panel.stream.off")
       if (stream?.error && status !== "connected" && status !== "idle") {
-        text += ` · ${t("panel.stream.error")}: ${stream.error}`
+        const full = String(stream.error)
+        const shown = full.length > 160 ? `${full.slice(0, 160)}…` : full
+        text += ` · ${t("panel.stream.error")}: ${shown}`
       }
       return text
     }
@@ -337,7 +339,7 @@ window.__ModuleLoader__.load({
         }, busy ? t("panel.busy") : (latched ? t("panel.emergencyLatched") : t("panel.emergency"))),
         latched ? h("div", { style: style.warning }, t("panel.emergencyLatchedBanner")) : null,
         error ? h("div", { style: style.error }, error) : null,
-        h("div", { style: style.muted },
+        h("div", { style: style.muted, title: state.stream?.error || undefined },
           `${t("panel.stream")}: ${streamLabel(t, state.stream)}` +
           (updated ? ` · ${t("panel.updated")} ${updated}` : "") +
           (state.baseUrl ? ` · ${state.baseUrl}` : "")),

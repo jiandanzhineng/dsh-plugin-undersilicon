@@ -10,7 +10,7 @@ export const FALLBACK_RANGES = Object.freeze({
   suction: { set: { value: { min: 0, max: 100 } } },
   estim: { set: { intensity: { min: 0, max: 255 } } },
   motors: { set: { 'channels.*.value': { min: 0, max: 255 }, 'channels.*': { min: 0, max: 255 } } },
-  pump: { start: { rate: { min: 0, max: 255 }, ss: { min: 0, max: 255 } } },
+  pump: { start: { rate: { min: 0, max: 255 }, ss: { min: 0, max: 60, unit: 's' } } },
 })
 
 /** Only intensity-like fields may be threshold-scaled. Config values stay intact. */
@@ -40,7 +40,11 @@ export function isScalableField(capability, field) {
 function filterFields(capability, fields) {
   const out = {}
   for (const [field, range] of Object.entries(fields || {})) {
-    if (isScalableField(capability, field)) out[field] = range
+    if (!isScalableField(capability, field)) continue
+    // The backend output guard treats pump.ss as seconds with a hard 60s cap.
+    out[field] = capability === 'pump' && field === 'ss'
+      ? { ...range, max: Math.min(60, Number(range.max)), unit: range.unit || 's' }
+      : range
   }
   return out
 }

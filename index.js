@@ -4,6 +4,7 @@ import { ControlPanelClient } from './src/sdk/client.js'
 import { AuditLog } from './src/safety/audit.js'
 import { SafetyLayer } from './src/safety/safety.js'
 import { Watchdog } from './src/safety/watchdog.js'
+import { AgentLease } from './src/safety/lease.js'
 import { EventManager } from './src/events/manager.js'
 import { ScriptManager } from './src/scripts/manager.js'
 import { registerStatusTools } from './src/tools/status.js'
@@ -33,6 +34,7 @@ export const Config = z.object({
   auditEnabled: z.boolean().default(true),
   scripts: z.object({
     maxConcurrent: z.number().min(1).max(32).step(1).default(8),
+    maxSessions: z.number().min(1).max(32).step(1).default(8),
     allowPersist: z.boolean().default(true),
     memoryMb: z.number().min(16).max(512).step(1).default(64),
     syncTimeoutMs: z.number().min(100).max(60000).step(100).default(5000),
@@ -41,6 +43,7 @@ export const Config = z.object({
   }).default({}),
   events: z.object({
     maxSubscriptions: z.number().min(1).max(64).step(1).default(20),
+    maxTotalSubscriptions: z.number().min(1).max(256).step(1).default(64),
     minThrottleMs: z.number().min(500).max(3600000).step(100).default(500),
     defaultThrottleMs: z.number().min(500).max(3600000).step(100).default(1000),
     maxEvents: z.number().min(1).max(1000).step(1).default(30),
@@ -71,6 +74,8 @@ export function apply(ctx, config = {}) {
     Object.assign(runtimeConfig, settings.applyTo())
     settings.config = runtimeConfig
     watchdog.setTtl(runtimeConfig.watchdogTtlSec)
+    lease.setTtl(runtimeConfig.watchdogTtlSec)
+    lease.setLimits(runtimeConfig.limits)
     safety.config = runtimeConfig
     events.config = runtimeConfig
     scripts.config = runtimeConfig
@@ -78,7 +83,10 @@ export function apply(ctx, config = {}) {
   const client = new ControlPanelClient({ baseUrl: runtimeConfig.baseUrl })
   const audit = new AuditLog({ enabled: runtimeConfig.auditEnabled })
   const watchdog = new Watchdog({ client, ttlSeconds: runtimeConfig.watchdogTtlSec, log })
-  const safety = new SafetyLayer({ client, config: runtimeConfig, audit, watchdog, log })
+  const lease = new AgentLease({
+    client, ttlSeconds: runtimeConfig.watchdogTtlSec, limits: runtimeConfig.limits, log,
+  })
+  const safety = new SafetyLayer({ client, config: runtimeConfig, audit, watchdog, lease, log })
   const events = new EventManager({ client, config: runtimeConfig, audit, log })
   let scripts
   const notifyAgent = async (agent, text, wake, script) => {
@@ -92,7 +100,7 @@ export function apply(ctx, config = {}) {
     else agent.inject(message)
   }
   const stopDevices = async ({ sessionId, source, reason }) => {
-    const result = await safety.emergencyStop({ sessionId, source, reason })
+    const result = await safety.emergencyStop({ sessionId, source, reason, skipHooks: true })
     watchdog.stop(sessionId)
     return result
   }
@@ -121,6 +129,7 @@ export function apply(ctx, config = {}) {
       scripts: scripts?.list() || [],
       subscriptions: events.list(),
       watchdog: watchdog.status(),
+      lease: lease.status(),
       stream: events.state,
       emergency: safety.emergencyState(),
       thresholds: runtimeConfig.limits,
@@ -133,8 +142,14 @@ export function apply(ctx, config = {}) {
     client, safety, events, audit, config: runtimeConfig, log,
     notifyAgent, emergencyStop: stopDevices, statusProvider,
   })
+  safety.setEmergencyHooks({
+    stopScripts: (reason) => scripts.stopAll(reason, undefined, { explicit: false }),
+    stopSubscriptions: () => events.dispose(),
+    stopWatchdog: (sessionId) => watchdog.stop(sessionId),
+  })
+  void lease.probe().catch((error) => log('lease probe failed', { error: error.message }))
   const deps = {
-    client, safety, watchdog, scripts, events, audit, config: runtimeConfig, log,
+    client, safety, watchdog, scripts, events, audit, config: runtimeConfig, log, lease,
     getAttachments: () => ctx.get('attachments'),
     canUseImage: (exec) => canUseImage(ctx, exec),
   }
@@ -214,6 +229,7 @@ export function apply(ctx, config = {}) {
     if (!sessionId) return
     scripts.stopSession(sessionId, 'session-end')
     events.unsubscribeOwner(sessionId)
+    void lease.release(sessionId).catch((error) => log('session-end lease release failed', { error: error.message }))
     audit.record({
       sessionId, source: { kind: 'system', name: 'session-end' }, action: 'session.end',
       result: { ok: true, stopOnSessionEnd: runtimeConfig.stopOnSessionEnd },
@@ -236,6 +252,7 @@ export function apply(ctx, config = {}) {
       await Promise.race([stop, sleep(3000)])
     }
     watchdog.dispose()
+    await lease.dispose()
     audit.record({ source: { kind: 'system', name: 'plugin-dispose' }, action: 'plugin.dispose', result: { ok: true } })
     await audit.flush()
   })

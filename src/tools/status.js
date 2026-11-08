@@ -9,7 +9,7 @@ function summaryContent(value) {
 
 /** Register status/read tools. */
 export function registerStatusTools(ctx, deps) {
-  const { client, safety, scripts, events, watchdog, audit, config } = deps
+  const { client, safety, scripts, events, watchdog, audit, config, lease } = deps
 
   ctx.tools.register(jsonTool({
     name: 'panel_status',
@@ -19,12 +19,13 @@ export function registerStatusTools(ctx, deps) {
     async execute(_args, exec) {
       const signal = exec.signal
       const sessionId = sessionIdOf(exec)
+      const scoped = client.forSession(sessionId)
       const [remote, clientState, devices, game, runtime, ranges] = await Promise.all([
-        client.remoteStatus({ signal }).catch((error) => ({ error: error.message, code: error.code })),
-        client.clientState({ signal }).catch((error) => ({ available: false, error: error.message, code: error.code })),
-        client.devices({ signal }).catch(() => []),
-        client.gameStatus({ signal }).catch(() => null),
-        client.gameRuntimeStatus({ signal }).catch(() => null),
+        scoped.remoteStatus({ signal }).catch((error) => ({ error: error.message, code: error.code })),
+        scoped.clientState({ signal }).catch((error) => ({ available: false, error: error.message, code: error.code })),
+        scoped.devices({ signal }).catch(() => []),
+        scoped.gameStatus({ signal }).catch(() => null),
+        scoped.gameRuntimeStatus({ signal }).catch(() => null),
         safety.getRanges({ signal }).catch(() => ({})),
       ])
       const mode = await safety.getMode({ signal })
@@ -53,6 +54,7 @@ export function registerStatusTools(ctx, deps) {
         eventStream: events.state,
         availableCapabilities: Object.keys(ranges || {}),
         watchdog: watchdog.status(),
+        agentLease: lease?.status?.(),
         recentAudit: audit.recent(8),
         sessionId,
       }
@@ -70,7 +72,8 @@ export function registerStatusTools(ctx, deps) {
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
-      let devices = await client.devices({ signal: exec.signal })
+      const scoped = client.forSession(sessionIdOf(exec))
+      let devices = await scoped.devices({ signal: exec.signal })
       if (args.connectedOnly) devices = devices.filter((device) => device.connected)
       if (args.type) devices = devices.filter((device) => device.type === args.type)
       return {
@@ -99,10 +102,11 @@ export function registerStatusTools(ctx, deps) {
     },
     output: { schema: { type: 'json' }, render: (_args, value) => renderJson(value) },
     async execute(args, exec) {
-      const device = await client.device(args.deviceId, { signal: exec.signal })
+      const scoped = client.forSession(sessionIdOf(exec))
+      const device = await scoped.device(args.deviceId, { signal: exec.signal })
       const [typeConfig, monitor, allRanges] = await Promise.all([
-        client.deviceTypeConfig(device.type, { signal: exec.signal }).catch(() => null),
-        args.includeMonitor === false ? null : client.monitorData(args.deviceId, { signal: exec.signal }).catch(() => null),
+        scoped.deviceTypeConfig(device.type, { signal: exec.signal }).catch(() => null),
+        args.includeMonitor === false ? null : scoped.monitorData(args.deviceId, { signal: exec.signal }).catch(() => null),
         safety.getRanges({ signal: exec.signal }).catch(() => ({})),
       ])
       const capabilities = typeConfig?.capabilities || Object.keys(typeConfig?.capabilityConfig || {})
