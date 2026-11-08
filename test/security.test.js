@@ -323,6 +323,46 @@ test('emergency halt aborts in-flight work and prevents a late command from bein
   assert.ok(order.includes('runtime-stop'))
 })
 
+test('emergency stop retries every step and reports per-step failures', async (t) => {
+  const audit = new AuditLog({ enabled: false })
+  let stopAllAttempts = 0
+  let runtimeCalls = 0
+  const client = {
+    baseUrl: 'http://127.0.0.1:1/api',
+    lastMode: 'local',
+    remoteStatus: async () => { client.lastMode = 'local'; return { active: false } },
+    stopAll: async () => {
+      stopAllAttempts += 1
+      if (stopAllAttempts < 3) {
+        const error = new Error('stop-all busy')
+        error.status = 500
+        throw error
+      }
+      return { ok: true }
+    },
+    stopCurrentGame: async () => {
+      const error = new Error('game stop failed')
+      error.status = 500
+      throw error
+    },
+    gameRuntimeStop: async () => { runtimeCalls += 1; return { ok: true } },
+  }
+  const safety = new SafetyLayer({
+    client, config: { limits: { default: 60 } }, audit,
+    watchdog: { touch: async () => ({ ok: true }) },
+  })
+  const stop = await safety.emergencyStop({
+    sessionId: 's1', source: { kind: 'tool' }, reason: 'retry test',
+  })
+  assert.equal(stopAllAttempts, 3)
+  assert.equal(stop.ok, false)
+  assert.equal(runtimeCalls, 1)
+  const stopAll = stop.results.find((item) => item.name === 'device-watchdog/stop-all')
+  const game = stop.results.find((item) => item.name === 'games/stop-current')
+  assert.deepEqual({ ok: stopAll.ok, attempts: stopAll.attempts }, { ok: true, attempts: 3 })
+  assert.deepEqual({ ok: game.ok, attempts: game.attempts, status: game.status }, { ok: false, attempts: 3, status: 500 })
+})
+
 test('watchdog lease failure before a control refuses to send the command', async (t) => {
   const audit = new AuditLog({ enabled: false })
   let called = false

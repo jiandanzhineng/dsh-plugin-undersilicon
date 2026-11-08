@@ -82,7 +82,7 @@
 
 ## 测试
 
-- `npm test` → `node --test --test-concurrency=1 test/*.test.js`，当前 85 项全过。
+- `npm test` → `node --test --test-concurrency=1 test/*.test.js`，当前 86 项全过。
 - 单测覆盖：缩放与上下限、严格数字/未知字段、路径规范化与写白名单、预置操作翻译、
   游戏参数缩放、面板锁存/恢复、急停 epoch 与重试、看门狗、沙箱逃逸与权限模型拒绝、RPC、
   并发/内存/卡死限制、订阅节流/通知限速、设置优先级与面板写入、SDK、tool 集成。
