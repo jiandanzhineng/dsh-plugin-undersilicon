@@ -237,3 +237,27 @@ test('script_run refuses before starting when the panel is latched', async () =>
   )
   assert.equal(started, false)
 })
+
+test('script_stop gives a clear rejection for a script owned by another session', async () => {
+  const tools = new Map()
+  const ctx = { tools: { register(definition) { tools.set(definition.name, definition) } } }
+  const calls = []
+  registerScriptTools(ctx, {
+    safety: { assertActive() {} },
+    scripts: {
+      stop(id, reason, options) {
+        calls.push({ id, reason, options })
+        return false
+      },
+    },
+  })
+  const otherSession = fakeExec({
+    agent: { session: { id: 's2' }, options: {}, inject() {}, followup() {} },
+  })
+  await assert.rejects(
+    tools.get('script_stop').execute({ scriptId: 'script_x' }, otherSession),
+    /another session|其他会话/,
+  )
+  assert.equal(calls[0].id, 'script_x')
+  assert.equal(calls[0].options.sessionId, 's2')
+})

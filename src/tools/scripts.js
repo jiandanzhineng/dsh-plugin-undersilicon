@@ -63,7 +63,14 @@ export function registerScriptTools(ctx, deps) {
     async execute(args, exec) {
       const sessionId = sessionIdOf(exec)
       if (args.scriptId) {
-        return { ok: scripts.stop(args.scriptId, 'script_stop', { sessionId }), scriptId: args.scriptId }
+        const stopped = scripts.stop(args.scriptId, 'script_stop', { sessionId })
+        if (!stopped) {
+          throw new Error(
+            `无法停止脚本 ${args.scriptId}：它不存在或属于其他会话。 ` +
+            `Script ${args.scriptId} was not found in this agent session; another session's script cannot be stopped from here.`,
+          )
+        }
+        return { ok: true, scriptId: args.scriptId }
       }
       return { ok: true, stopped: scripts.stopAll('script_stop_all', sessionId) }
     },
