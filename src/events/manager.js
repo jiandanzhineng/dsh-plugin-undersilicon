@@ -1,0 +1,394 @@
+import { streamEvents } from '../sdk/events-stream.js'
+import { errorMessage } from '../util/errors.js'
+
+const MAX_RING = 200
+
+/** Read a dot path from an event payload. */
+export function getPath(value, path) {
+  let cursor = value
+  for (const part of String(path || '').split('.')) {
+    if (cursor === null || cursor === undefined) return undefined
+    cursor = cursor[part]
+  }
+  return cursor
+}
+
+/** Evaluate one simple `where` condition. */
+export function matchesWhere(event, where) {
+  if (!where) return true
+  const actual = getPath(event, where.field)
+  const expected = where.value
+  switch (where.op || 'eq') {
+    case 'eq': return actual === expected
+    case 'ne': return actual !== expected
+    case 'gt': return Number(actual) > Number(expected)
+    case 'gte': return Number(actual) >= Number(expected)
+    case 'lt': return Number(actual) < Number(expected)
+    case 'lte': return Number(actual) <= Number(expected)
+    case 'contains': return typeof actual === 'string' && actual.includes(String(expected))
+      || Array.isArray(actual) && actual.includes(expected)
+    case 'exists': return actual !== undefined && actual !== null
+    case 'truthy': return Boolean(actual)
+    case 'falsy': return !actual
+    default: return false
+  }
+}
+
+/** Match a type list (`device` matches `device.updated`). */
+export function matchesTypes(type, types) {
+  if (!types?.length) return true
+  return types.some((prefix) => type === prefix || String(type).startsWith(`${prefix}.`))
+}
+
+/** Match one event against a subscription. */
+export function matchesSubscription(event, subscription) {
+  if (!matchesTypes(event.type, subscription.types)) return false
+  if (subscription.deviceId) {
+    const id = event.deviceId ?? event.device?.id
+    if (id !== subscription.deviceId) return false
+  }
+  return matchesWhere(event, subscription.where)
+}
+
+/** Compact one event for a model-facing subscription message. */
+export function formatEventText(event, subscription) {
+  const body = { type: event.type, ts: event.ts, seq: event.seq }
+  if (event.deviceId) body.deviceId = event.deviceId
+  if (event.data) body.data = event.data
+  if (event.changes) body.changes = event.changes
+  if (event.gameId) body.gameId = event.gameId
+  if (event.mode) body.mode = event.mode
+  if (event.path) body.path = event.path
+  if (event._count > 1) body.mergedCount = event._count
+  let json = JSON.stringify(body)
+  if (json.length > 1800) json = `${json.slice(0, 1800)}…[truncated]`
+  return `[undersilicon ${subscription.id}] ${subscription.prompt || 'event'}\n${json}`
+}
+
+/** Event stream fan-out shared by agent subscriptions, scripts and the panel. */
+export class EventManager {
+  constructor({ client, config, audit, log = () => {}, clock = globalThis } = {}) {
+    this.client = client
+    this.config = config
+    this.audit = audit
+    this.log = log
+    this.clock = clock
+    this.subscriptions = new Map()
+    this.ring = []
+    this.lastSeq = undefined
+    this.state = { connected: false, mode: 'unknown', lastEventAt: null, error: null, fallback: false }
+    this.abort = null
+    this.loopPromise = null
+    this.nextId = 1
+    this.pollTimer = null
+    this.deviceCache = new Map()
+  }
+
+  limits() {
+    return {
+      maxSubscriptions: Math.max(1, Number(this.config?.events?.maxSubscriptions ?? 16)),
+      minThrottleMs: Math.max(100, Number(this.config?.events?.minThrottleMs ?? 200)),
+      defaultThrottleMs: Math.max(200, Number(this.config?.events?.defaultThrottleMs ?? 1000)),
+      defaultMaxEvents: Math.max(1, Number(this.config?.events?.maxEvents ?? 50)),
+    }
+  }
+
+  /** Add a subscription and make sure the shared stream is running. */
+  subscribe(options) {
+    const limits = this.limits()
+    if (this.subscriptions.size >= limits.maxSubscriptions) {
+      throw new Error(`too many event subscriptions (max ${limits.maxSubscriptions}); unsubscribe one first`)
+    }
+    const id = `sub_${this.nextId++}`
+    const subscription = {
+      id,
+      kind: options.kind || 'agent',
+      ownerId: options.ownerId,
+      agent: options.agent,
+      onEvent: options.onEvent,
+      types: options.types || [],
+      deviceId: options.deviceId,
+      where: options.where,
+      prompt: options.prompt || '',
+      mode: options.mode === 'inject' ? 'inject' : 'wake',
+      throttleMs: Math.max(limits.minThrottleMs, Number(options.throttleMs ?? limits.defaultThrottleMs)),
+      maxEvents: Math.max(1, Number(options.maxEvents ?? limits.defaultMaxEvents)),
+      delivered: 0,
+      pending: null,
+      pendingCount: 0,
+      firstTs: null,
+      timer: null,
+      createdAt: new Date().toISOString(),
+    }
+    this.subscriptions.set(id, subscription)
+    void this.ensureStream()
+    return this.describe(subscription)
+  }
+
+  /** Remove one subscription; the shared stream stops when the last one leaves. */
+  unsubscribe(id) {
+    const subscription = this.subscriptions.get(id)
+    if (!subscription) return false
+    if (subscription.timer) this.clock.clearTimeout(subscription.timer)
+    this.subscriptions.delete(id)
+    if (this.subscriptions.size === 0) this.stopStream()
+    return true
+  }
+
+  /** Remove every subscription owned by one agent session or script. */
+  unsubscribeOwner(ownerId) {
+    let removed = 0
+    for (const [id, subscription] of this.subscriptions) {
+      if (subscription.ownerId === ownerId) {
+        this.unsubscribe(id)
+        removed += 1
+      }
+    }
+    return removed
+  }
+
+  /** Metadata for the panel/status tools. Undefined filters are omitted for lossless JSON. */
+  describe(subscription) {
+    const out = {
+      id: subscription.id, kind: subscription.kind, ownerId: subscription.ownerId,
+      types: subscription.types,
+      mode: subscription.mode, prompt: subscription.prompt,
+      throttleMs: subscription.throttleMs, maxEvents: subscription.maxEvents,
+      delivered: subscription.delivered, createdAt: subscription.createdAt,
+    }
+    if (subscription.deviceId !== undefined) out.deviceId = subscription.deviceId
+    if (subscription.where !== undefined) out.where = subscription.where
+    return out
+  }
+
+  list() {
+    return [...this.subscriptions.values()].map((item) => this.describe(item))
+  }
+
+  /** Recent events (ring buffer; falls back to the backend when empty). */
+  async recent({ limit = 100, types } = {}) {
+    let events = this.ring.filter((event) => matchesTypes(event.type, types)).slice(-limit)
+    if (events.length === 0) {
+      try {
+        const payload = await this.client.eventsRecent({ limit, types })
+        const list = Array.isArray(payload) ? payload : payload?.events || []
+        events = list
+      } catch {
+        events = []
+      }
+    }
+    return events.slice(-limit)
+  }
+
+  /** Feed one event into the fan-out. Exported for tests via `dispatch`. */
+  dispatch(event) {
+    if (!event || typeof event.type !== 'string') return
+    this.ring.push(event)
+    if (this.ring.length > MAX_RING) this.ring.shift()
+    this.state.lastEventAt = new Date().toISOString()
+    for (const subscription of [...this.subscriptions.values()]) {
+      if (!matchesSubscription(event, subscription)) continue
+      if (subscription.kind === 'script' && subscription.onEvent) {
+        this.deliverScript(subscription, event)
+        continue
+      }
+      this.queueAgent(subscription, event)
+    }
+  }
+
+  deliverScript(subscription, event) {
+    if (subscription.timer) return
+    subscription.delivered += 1
+    try {
+      subscription.onEvent(event)
+    } catch (error) {
+      this.log('script event handler failed', { id: subscription.id, error: errorMessage(error) })
+    }
+    if (subscription.delivered >= subscription.maxEvents) this.finish(subscription, 'max-events')
+  }
+
+  queueAgent(subscription, event) {
+    subscription.pendingCount += 1
+    subscription.firstTs ??= event.ts
+    subscription.pending = event
+    if (subscription.timer) return
+    subscription.timer = this.clock.setTimeout(() => {
+      subscription.timer = null
+      const latest = subscription.pending
+      if (!latest) return
+      const merged = {
+        ...latest, _count: subscription.pendingCount, _firstTs: subscription.firstTs,
+      }
+      subscription.pending = null
+      subscription.pendingCount = 0
+      subscription.firstTs = null
+      subscription.delivered += 1
+      this.deliverAgent(subscription, merged)
+      if (subscription.delivered >= subscription.maxEvents) this.finish(subscription, 'max-events')
+    }, subscription.throttleMs)
+    subscription.timer?.unref?.()
+  }
+
+  deliverAgent(subscription, event) {
+    const agent = subscription.agent
+    if (!agent) {
+      this.unsubscribe(subscription.id)
+      return
+    }
+    const text = formatEventText(event, subscription)
+    const message = { content: [{ type: 'text', text }], source: { kind: 'undersilicon' } }
+    try {
+      if (subscription.mode === 'inject') agent.inject(message)
+      else agent.followup(message)
+    } catch (error) {
+      this.log('agent event delivery failed', { id: subscription.id, error: errorMessage(error) })
+      this.unsubscribe(subscription.id)
+    }
+  }
+
+  finish(subscription, reason) {
+    if (!this.subscriptions.has(subscription.id)) return
+    const agent = subscription.agent
+    this.unsubscribe(subscription.id)
+    this.audit.record({
+      sessionId: subscription.ownerId, source: { kind: 'events', id: subscription.id },
+      action: 'events.auto-unsubscribe',
+      result: { ok: true, reason, delivered: subscription.delivered },
+    })
+    if (agent) {
+      try {
+        agent.inject({
+          content: [{
+            type: 'text',
+            text: `[undersilicon ${subscription.id}] subscription ended (${reason}) after ${subscription.delivered} events. Use events_subscribe again if you still need it.`,
+          }],
+          source: { kind: 'undersilicon' },
+        })
+      } catch { /* agent may be gone */ }
+    }
+  }
+
+  ensureStream() {
+    if (this.loopPromise || this.subscriptions.size === 0) return this.loopPromise
+    this.loopPromise = this.streamLoop().finally(() => { this.loopPromise = null })
+    return this.loopPromise
+  }
+
+  async streamLoop() {
+    const controller = new AbortController()
+    this.abort = controller
+    let backoff = 1000
+    while (this.subscriptions.size > 0 && !controller.signal.aborted) {
+      const types = this.unionTypes()
+      try {
+        const outcome = await streamEvents({
+          baseUrl: this.client.baseUrl,
+          types,
+          lastEventId: this.lastSeq,
+          signal: controller.signal,
+          onHello: (hello) => {
+            this.state.connected = true
+            this.state.fallback = false
+            this.state.mode = hello.mode || this.state.mode
+            if (Number.isFinite(hello.seq)) this.lastSeq = hello.seq
+            this.stopPolling()
+          },
+          onEvent: (event) => {
+            this.state.connected = true
+            if (Number.isFinite(event._id)) this.lastSeq = event._id
+            this.dispatch(event)
+          },
+        })
+        if (outcome === 'aborted') break
+        this.state.connected = false
+      } catch (error) {
+        this.state.connected = false
+        this.state.error = errorMessage(error)
+        if (controller.signal.aborted) break
+        if (error?.status === 404 || error?.code === 'EVENT_STREAM_UNAVAILABLE') {
+          this.startPolling()
+        }
+        this.log('event stream reconnect', { error: this.state.error, backoff })
+      }
+      await new Promise((resolve) => {
+        const timer = this.clock.setTimeout(resolve, backoff)
+        timer.unref?.()
+        controller.signal.addEventListener('abort', () => { this.clock.clearTimeout(timer); resolve() }, { once: true })
+      })
+      backoff = Math.min(15000, Math.floor(backoff * 1.7))
+    }
+    this.state.connected = false
+  }
+
+  unionTypes() {
+    const set = new Set()
+    let all = false
+    for (const subscription of this.subscriptions.values()) {
+      if (!subscription.types.length) all = true
+      for (const type of subscription.types) set.add(type)
+    }
+    return all ? undefined : [...set]
+  }
+
+  stopStream() {
+    this.stopPolling()
+    this.abort?.abort()
+    this.abort = null
+  }
+
+  /** Poll devices when the A-side event stream is not deployed. */
+  startPolling() {
+    if (this.pollTimer) return
+    this.state.fallback = true
+    const poll = async () => {
+      try {
+        const devices = await this.client.devices()
+        const next = new Map((devices || []).map((device) => [device.id, device]))
+        for (const [id, device] of next) {
+          const previous = this.deviceCache.get(id)
+          if (!previous) this.dispatch({ type: 'device.added', ts: new Date().toISOString(), deviceId: id, device })
+          else if (previous.connected !== device.connected) {
+            this.dispatch({
+              type: device.connected ? 'device.connected' : 'device.disconnected',
+              ts: new Date().toISOString(), deviceId: id, device,
+            })
+          } else if (JSON.stringify(previous.data || {}) !== JSON.stringify(device.data || {})) {
+            this.dispatch({
+              type: 'device.updated', ts: new Date().toISOString(), deviceId: id,
+              changes: diffData(previous.data || {}, device.data || {}), data: device.data || {},
+            })
+          }
+        }
+        for (const [id, device] of this.deviceCache) {
+          if (!next.has(id)) this.dispatch({ type: 'device.removed', ts: new Date().toISOString(), deviceId: id, device })
+        }
+        this.deviceCache = next
+      } catch (error) {
+        this.state.error = errorMessage(error)
+      }
+    }
+    void poll()
+    this.pollTimer = this.clock.setInterval(poll, 2000)
+    this.pollTimer?.unref?.()
+  }
+
+  stopPolling() {
+    if (this.pollTimer) this.clock.clearInterval(this.pollTimer)
+    this.pollTimer = null
+  }
+
+  /** Stop every subscription and the shared stream (plugin dispose / emergency). */
+  dispose() {
+    for (const id of [...this.subscriptions.keys()]) this.unsubscribe(id)
+    this.stopStream()
+  }
+}
+
+/** Shallow key diff used by the polling fallback. */
+export function diffData(previous, next) {
+  const changes = {}
+  for (const [key, value] of Object.entries(next)) {
+    if (JSON.stringify(previous[key]) !== JSON.stringify(value)) changes[key] = value
+  }
+  return changes
+}
