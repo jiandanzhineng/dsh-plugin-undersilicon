@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
 import { ControlPanelClient } from './src/sdk/client.js'
 import { AuditLog } from './src/safety/audit.js'
@@ -67,6 +68,8 @@ export function apply(ctx, config = {}) {
   let scripts
   const notifyAgent = async (agent, text, wake, script) => {
     const message = {
+      id: randomUUID(),
+      role: 'user',
       content: [{ type: 'text', text: `[undersilicon script ${script?.name || script?.id || ''}] ${text}` }],
       source: { kind: 'undersilicon' },
     }
@@ -127,7 +130,10 @@ export function apply(ctx, config = {}) {
     try { scoped.skills.register(SKILL) } catch (error) { log('skill registration failed', { error: error.message }) }
   })
 
-  // Optional: host<->client RPC channel for the right-sidebar panel.
+  // Right-sidebar panel RPC. `connection.rpc.handle` is unusable on dsh
+  // 0.2.1-rc.3 (it reads `webServer` from the connection plugin's own
+  // context, which does not inject it), so the panel uses one exact
+  // authenticated `/api` Fetch route instead.
   ctx.inject(['connection'], (scoped) => {
     const handler = createPanelHandler({
       status: statusProvider,
@@ -144,7 +150,21 @@ export function apply(ctx, config = {}) {
         return { ...result, stoppedScripts: stopped }
       },
     })
-    const dispose = scoped.connection.rpc.handle('/undersilicon', handler)
+    const dispose = scoped.connection.fetch.register({
+      path: '/api/undersilicon',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body
+        try {
+          body = await request.json()
+        } catch {
+          return Response.json({ ok: false, error: { code: 'BAD_REQUEST', message: 'body is not JSON', details: {} } }, { status: 400 })
+        }
+        const result = await handler(String(body?.endpoint || ''), body?.payload ?? {})
+        return Response.json(result, { headers: { 'cache-control': 'no-store' } })
+      },
+    })
     scoped.effect(() => dispose)
   })
 

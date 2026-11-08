@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
       "panel.mode.remote-operator": "远程主控",
       "panel.mode.remote-controlled": "被远程控制",
       "panel.mode.unknown": "未知",
+      "panel.thresholds": "阈值",
       "panel.devices": "设备",
       "panel.noDevices": "没有可见设备",
       "panel.connected": "已连接",
@@ -34,6 +35,7 @@ window.__ModuleLoader__.load({
       "panel.stream": "事件流",
       "panel.stream.on": "已连接",
       "panel.stream.off": "未连接",
+      "panel.stream.idle": "待命（无订阅）",
       "panel.stream.fallback": "轮询兜底",
       "panel.busy": "执行中…",
       "panel.emergencyDone": "已急停",
@@ -54,6 +56,7 @@ window.__ModuleLoader__.load({
       "panel.mode.remote-operator": "Remote operator",
       "panel.mode.remote-controlled": "Remote-controlled",
       "panel.mode.unknown": "Unknown",
+      "panel.thresholds": "Thresholds",
       "panel.devices": "Devices",
       "panel.noDevices": "No visible devices",
       "panel.connected": "connected",
@@ -70,6 +73,7 @@ window.__ModuleLoader__.load({
       "panel.stream": "Event stream",
       "panel.stream.on": "connected",
       "panel.stream.off": "disconnected",
+      "panel.stream.idle": "idle (no subscriptions)",
       "panel.stream.fallback": "polling fallback",
       "panel.busy": "Working…",
       "panel.emergencyDone": "Stopped",
@@ -177,12 +181,13 @@ window.__ModuleLoader__.load({
             h("h2", { style: { ...style.title, fontSize: "15px" } }, t("panel.title"))),
           h("div", { style: style.row },
             h("span", { style: style.badge }, `${t("panel.mode")}: ${modeLabel(t, state.mode)}`),
+            state.thresholds ? h("span", { style: style.badge }, `${t("panel.thresholds")}: ${state.thresholds.default}% / ${state.thresholds.capabilities?.shock ?? "-"}%`) : null,
             h("button", { style: style.button, onClick: () => { void load() }, disabled: busy }, t("panel.refresh")))),
         h("button", { style: style.emergency, onClick: emergency, disabled: busy, title: t("panel.emergencyHint") },
           busy ? t("panel.busy") : t("panel.emergency")),
         error ? h("div", { style: style.error }, error) : null,
         h("div", { style: style.muted },
-          `${t("panel.stream")}: ${state.stream?.connected ? t("panel.stream.on") : (state.stream?.fallback ? t("panel.stream.fallback") : t("panel.stream.off"))}` +
+          `${t("panel.stream")}: ${state.stream?.connected ? t("panel.stream.on") : (state.stream?.fallback ? t("panel.stream.fallback") : (subscriptions.length === 0 ? t("panel.stream.idle") : t("panel.stream.off")))}` +
           (updated ? ` · ${t("panel.updated")} ${updated}` : "") +
           (state.baseUrl ? ` · ${state.baseUrl}` : "")),
         section(t("panel.devices"), devices.length === 0 ? h("div", { style: style.muted }, t("panel.noDevices")) :
@@ -236,7 +241,15 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), "undersilicon: dictionaries")
       const t = ctx.locale.bind(NS)
-      const call = (endpoint, payload) => ctx.connection.rpc.call("/undersilicon", endpoint, payload)
+      const call = async (endpoint, payload) => {
+        const response = await fetch("/api/undersilicon", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ endpoint, payload: payload || {} }),
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return await response.json()
+      }
       ctx.effect(() => ctx.sidebarRightTabs.register({
         id: KEY,
         kind: "undersilicon",
@@ -257,7 +270,6 @@ window.__ModuleLoader__.load({
       }, OpenButton))
     }
 
-    module.exports = { apply, inject, name: "undersilicon" }
-    return module.exports
+    return { apply, inject, name: "undersilicon" }
   }
 })

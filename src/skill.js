@@ -131,6 +131,8 @@ Example: \`where: { field: "data.heart_rate", op: "gte", value: 150 }\`.
 /** Embedded skill offered to agents while the plugin is active. */
 export const SKILL = Object.freeze({
   name: 'undersilicon-control',
+  source: 'dsh-plugin-undersilicon',
+  provider: 'runtime',
   description: 'Control the 硅基之下控制中心 PC client: devices, safety thresholds, client UI, games, sandboxed scripts and device event subscriptions.',
   whenToUse: 'The user asks to inspect or control local/remote-projected devices, the control-center client window or games, or to automate reactions to device events.',
   content: CONTENT,

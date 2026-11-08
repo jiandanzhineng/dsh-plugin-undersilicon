@@ -62,7 +62,7 @@ export function registerClientTools(ctx, deps) {
       schema: { type: 'json' },
       render: (_args, value) => [{
         type: 'text',
-        text: JSON.stringify({ mime: value.mime, width: value.width, height: value.height, bytes: value.bytes, savedPath: value.savedPath, attached: Boolean(value.image) }, null, 2),
+        text: JSON.stringify({ mime: value.mime, width: value.width, height: value.height, bytes: value.bytes, savedPath: value.savedPath, attached: Boolean(value.image), imageCapable: value.imageCapable, attachmentsAvailable: value.attachmentsAvailable, attachError: value.attachError }, null, 2),
       }, ...(value.image ? [{
         type: 'image',
         attachment: value.image,
@@ -89,20 +89,28 @@ export function registerClientTools(ctx, deps) {
       const metadata = {
         mime, width: shot.width, height: shot.height, bytes: bytes.byteLength, savedPath,
       }
-      if (deps.canUseImage && !(await deps.canUseImage(exec))) return metadata
+      let imageCapable = true
+      try {
+        imageCapable = !deps.canUseImage || (await deps.canUseImage(exec))
+      } catch {
+        imageCapable = false
+      }
       const attachments = deps.getAttachments?.()
-      if (!attachments) return metadata
+      const diagnostics = { imageCapable, attachmentsAvailable: Boolean(attachments) }
+      if (!imageCapable) return { ...metadata, ...diagnostics }
+      if (!attachments) return { ...metadata, ...diagnostics }
       try {
         const ref = await attachments.saveImage({ data: bytes, mediaType: mime, name: savedPath.split(/[\\/]/).pop() })
         return {
           ...metadata,
+          ...diagnostics,
           image: {
             attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes,
             width: ref.width, height: ref.height, ...(ref.name ? { name: ref.name } : {}),
           },
         }
       } catch (error) {
-        return { ...metadata, attachError: error.message }
+        return { ...metadata, ...diagnostics, attachError: error.message }
       }
     },
   }))

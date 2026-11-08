@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { streamEvents } from '../sdk/events-stream.js'
 import { errorMessage } from '../util/errors.js'
 
@@ -236,7 +237,7 @@ export class EventManager {
       return
     }
     const text = formatEventText(event, subscription)
-    const message = { content: [{ type: 'text', text }], source: { kind: 'undersilicon' } }
+    const message = { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind: 'undersilicon' } }
     try {
       if (subscription.mode === 'inject') agent.inject(message)
       else agent.followup(message)
@@ -258,6 +259,8 @@ export class EventManager {
     if (agent) {
       try {
         agent.inject({
+          id: randomUUID(),
+          role: 'user',
           content: [{
             type: 'text',
             text: `[undersilicon ${subscription.id}] subscription ended (${reason}) after ${subscription.delivered} events. Use events_subscribe again if you still need it.`,
@@ -279,11 +282,13 @@ export class EventManager {
     this.abort = controller
     let backoff = 1000
     while (this.subscriptions.size > 0 && !controller.signal.aborted) {
-      const types = this.unionTypes()
+      // Subscribe without a server-side type filter: the stream is shared and
+      // subscriptions may be added after it connects, so a union captured here
+      // would silently miss events for later subscriptions. Filtering stays
+      // local in dispatch(), which already matches each subscription.
       try {
         const outcome = await streamEvents({
           baseUrl: this.client.baseUrl,
-          types,
           lastEventId: this.lastSeq,
           signal: controller.signal,
           onHello: (hello) => {
@@ -318,16 +323,6 @@ export class EventManager {
       backoff = Math.min(15000, Math.floor(backoff * 1.7))
     }
     this.state.connected = false
-  }
-
-  unionTypes() {
-    const set = new Set()
-    let all = false
-    for (const subscription of this.subscriptions.values()) {
-      if (!subscription.types.length) all = true
-      for (const type of subscription.types) set.add(type)
-    }
-    return all ? undefined : [...set]
   }
 
   stopStream() {
