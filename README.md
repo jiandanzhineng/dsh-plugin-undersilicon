@@ -24,13 +24,15 @@ A dsh plugin that lets an agent inspect and control the local
 ```json
 {
   "dependencies": {
-    "dsh-plugin-undersilicon": "link:E:/smart/project/dsh-undersilicon"
+    "dsh-plugin-undersilicon": "file:./plugin-src"
   }
 }
 ```
 
-> Windows 上 pnpm 10 无法正确解析跨盘的 `file:E:/...`（会拼成 profile 下的相对路径），
-> 因此本仓的开发 profile 使用 `link:`。其它平台可继续用 `file:`。
+> Windows 上 pnpm 10 无法解析跨盘的 `file:E:/...`（会拼成 profile 下的相对路径），`file:///`
+> 同样失败。做法：在 profile 内 `mklink /J plugin-src E:\smart\project\dsh-undersilicon`，
+> 再用相对 `file:./plugin-src`。目录依赖安装为复制件，改插件源码后重跑 `pnpm install`。
+> 其它平台直接写仓库路径即可。
 
 在 profile 的 `cordis.patch.yml` 增加（用户 patch 不能按 id 新增，必须 `insert`）：
 

@@ -32,10 +32,11 @@
 
 位置：`C:\Users\46907\.dsh\profiles\us-test`。只动这个 profile，不要动用户 desktop/web/headless。
 
-- `package.json` 依赖：`"dsh-plugin-undersilicon": "link:E:/smart/project/dsh-undersilicon"`。
-  原要求用 `file:`，但 pnpm 10 on Windows 会把 `file:E:/...` 解析成 profile 下的相对路径
-  （`...\us-test\E:\...`）并报 ENOENT；`file:///` 同样失败。`link:` 建符号链接，源码改动
-  即时生效，更适合同机开发。
+- `package.json` 依赖：`"dsh-plugin-undersilicon": "file:./plugin-src"`；`plugin-src` 是指向
+  `E:\smart\project\dsh-undersilicon` 的目录 junction（`mklink /J`）。pnpm 10 on Windows 无法
+  正确解析跨盘的 `file:E:/...`（会拼成 profile 下的相对路径并 ENOENT，`file:///` 同样失败），
+  所以用 profile 内 junction + 相对 `file:`。目录依赖安装出来是复制件，改插件源码后要重跑
+  `pnpm install`。安装后 `--dump-config` 应能看到 `undersilicon` 行。
 - `cordis.patch.yml`：用户 patch 不能按 id 新增行，必须用 `- insert:`：
   ```yaml
   - insert:
