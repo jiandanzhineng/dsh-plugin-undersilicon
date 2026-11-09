@@ -8,7 +8,7 @@ A dsh plugin that lets an agent inspect and control the local
 - 所有控制入口（tool、脚本、原始请求）统一经过安全层：百分比缩放、看门狗、急停、审计。
 - 后端再兜一层 agent 租约限幅：插件所有按会话的设备写/玩法启动都带
   `X-Agent-Client`，后端按租约中的百分比在最终写设备前再次钳制。需要客户端版本包含
-  `agent-control` 接口（随下一个客户端版本发布）；插件启动时探测租约接口，不支持就拒绝控制并提示升级。
+  `agent-control` 接口（1.0.42 及以上）；插件启动时探测租约接口，不支持就拒绝控制并提示升级。
 - 20 个 tool、每会话一个脚本沙箱子进程、SSE 事件订阅、中英双语右侧栏面板。
 
 ## 功能 / Features
@@ -26,7 +26,7 @@ A dsh plugin that lets an agent inspect and control the local
 ## 安装 / Install
 
 要求：dsh `0.2.1-rc.3` 及以上；本机运行「硅基之下控制中心」PC 客户端，版本需包含
-`agent-control` 接口（随下一个客户端版本发布），否则插件会拒绝控制并提示升级。
+`agent-control` 接口（1.0.42 及以上），否则插件会拒绝控制并提示升级。
 
 ### 从插件页安装（推荐）
 
