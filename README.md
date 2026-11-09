@@ -34,7 +34,7 @@ A dsh plugin that lets an agent inspect and control the local
 2. 填入下面任一来源，确认安装：
    - GitHub：`github:jiandanzhineng/dsh-plugin-undersilicon`
    - npm（发布后可用）：`dsh-plugin-undersilicon`
-3. 安装完成后组合包默认启用；重启 dsh（或启用 HMR 时等待重载）即生效。
+3. 安装完成点「立即启用」，然后完全重启 dsh 即生效（见下方「安装后」）。
 
 ### 从命令行安装
 
@@ -53,7 +53,10 @@ dsh plugin --profile <profile> add dsh-plugin-undersilicon
 
 ### 安装后
 
-- 右侧栏出现「硅基之下」面板：设备卡（强度条 + 阈值区）、急停按钮、事件流状态。
+- 点「立即启用」后需**完全重启 dsh**（桌面版退出再打开），刷新网页不够。
+- 打开一个会话，点会话标题旁的「硅基之下」按钮，右侧栏出现面板：设备卡（强度条 +
+  阈值区）、急停按钮、事件流状态。还没发过消息的空白新会话没有标题栏，先发一条消息。
+- 访问 GitHub 不稳定时，插件页会提示「无法访问 GitHub」；请开代理后重试，或等 npm 版发布后改用 npm 来源。
 - 阈值与运行设置：右侧栏面板 →「设置」，可改全局/按能力阈值、`stopOnSessionEnd`、
   脚本持久化、看门狗 TTL；保存立即生效并写入 `~/.dsh/undersilicon/settings.json`。
 - 需要控制中心客户端在运行；默认连接本机 `http://127.0.0.1:5278/api`。
