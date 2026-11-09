@@ -68,7 +68,7 @@
 
 - `package.json`：`dsh.manifestVersion: 1`、`dsh.bundle.patch: ./cordis.patch.yml`、`dsh.client`、
   根 `icon: ./icon.svg`、`repository` 指向 `https://github.com/jiandanzhineng/dsh-plugin-undersilicon`。
-  `files` 只列 index/src/client/patch/icon/README/LICENSE；`npm pack` 共 36 个文件，不含 tmp/test/docs/mock。
+  `files` 只列 index/src/client/patch/icon/README/LICENSE；`npm pack` 共 38 个文件（含 locale），不含 tmp/test/docs/mock。
 - `cordis.patch.yml` 用 `- insert:` 插入 `undersilicon` 行，不带 `config`（用 schema 默认值，
   `baseUrl=http://127.0.0.1:5278/api`）。安装器（插件页 / `dsh plugin add`）会把它加入 profile 的
   `dsh.profile.bundles` 并应用 patch，无需手改。
@@ -77,6 +77,11 @@
   dsh 0.2.1-rc.3 自带 cordis 4.0.5、schemastery 3.18.5、dsh-tools 0.2.1-rc.3，与
   `~4.0.5` / `~3.18.5` / `^0.2.1-rc.3` 相符。pnpm 会报 peers missing（profile 不自带 @deepseek-ai
   包，运行时由 dsh 模块回退提供），不影响安装或加载。
+- 插件页标题/描述来自 `locale/<语言>.json` 的 `meta`（dsh-app-boot 经 `exports["./locale/*.json"]`
+  解析 `<包>/locale/en.json`），没有时退回 package.json 的英文 description。
+- 发布：GitHub 公开仓库，打 `vX.Y.Z` tag；用户填 `github:jiandanzhineng/dsh-plugin-undersilicon`
+  安装（装默认分支）。npm 未发布。装好后要完全重启 dsh，面板入口在会话标题栏「硅基之下」按钮。
+- 本机推 GitHub：全局 gitconfig 代理 7990 已失效，用 `git -c http.proxy= -c https.proxy= push`。
 - 安装：插件页填 `dsh-plugin-undersilicon` 或 `github:jiandanzhineng/dsh-plugin-undersilicon`；
   CLI `dsh plugin --profile <name> add dsh-plugin-undersilicon`（`.tgz`/目录亦可）。
 - 已用全新 profile `us-install` 验证：`dsh plugin --profile us-install add <tgz 绝对路径>` 成功，
