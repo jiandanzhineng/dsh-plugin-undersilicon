@@ -79,10 +79,13 @@
   包，运行时由 dsh 模块回退提供），不影响安装或加载。
 - 插件页标题/描述来自 `locale/<语言>.json` 的 `meta`（dsh-app-boot 经 `exports["./locale/*.json"]`
   解析 `<包>/locale/en.json`），没有时退回 package.json 的英文 description。
-- 发布：GitHub 公开仓库，打 `vX.Y.Z` tag；用户填 `github:jiandanzhineng/dsh-plugin-undersilicon`
-  安装（装默认分支）。npm 未发布。装好后要完全重启 dsh，面板入口在会话标题栏「硅基之下」按钮。
+- 发布：npm `dsh-plugin-undersilicon`（账号 `undersilicon`，`publishConfig` 固定 npmjs 官方源，
+  本机默认源是 npmmirror）+ GitHub 公开仓库打 `vX.Y.Z` tag。npm 账号开了安全密钥 2FA，发布必须网页确认；
+  `!` 下的 `npm publish` 非交互会直接 EOTP 且网址被打码。用 `node tools/npm-publish-web.cjs <插件目录绝对路径>`
+  （后台跑）：打印 `AUTH_URL` 给用户在浏览器确认，脚本轮询拿 OTP 后发布。新包首发会先出现
+  `0.0.0-stage` 占位版本，约一分钟后自动替换为正式版，无需审批。
 - 本机推 GitHub：全局 gitconfig 代理 7990 已失效，用 `git -c http.proxy= -c https.proxy= push`。
-- 安装：插件页填 `dsh-plugin-undersilicon` 或 `github:jiandanzhineng/dsh-plugin-undersilicon`；
+- 安装（0.1.2 起 npm 可用，已用全新 profile 实测）：插件页填 `dsh-plugin-undersilicon` 或 `github:jiandanzhineng/dsh-plugin-undersilicon`；
   CLI `dsh plugin --profile <name> add dsh-plugin-undersilicon`（`.tgz`/目录亦可）。
 - 已用全新 profile `us-install` 验证：`dsh plugin --profile us-install add <tgz 绝对路径>` 成功，
   pnpm 11.28.5 未出现跨盘 `file:` bug；package.json 的 bundles 含本包，`--dump-config` 有

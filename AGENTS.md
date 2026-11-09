@@ -45,4 +45,4 @@ set MOCK_API_KEY=dummy && E:\software\dsh\resources\runtime\cli\bin\dsh.cmd --pr
 - 禁止把 API key 写入仓库或回复；密钥只从 `~/.dsh` 环境读取。
 - 安全语义不得弱化：所有控制入口必须经过 safety（缩放/看门狗/审计）。
 - 单次文件改动 ≤50 行；长文件分段编辑。
-- 远端：GitHub `jiandanzhineng/dsh-plugin-undersilicon`（公开）；npm 未发布，发布须经用户确认。
+- 远端：GitHub `jiandanzhineng/dsh-plugin-undersilicon`（公开）；npm 已发布 `dsh-plugin-undersilicon`（流程见 `docs/note.md`「打包与安装」），发新版须经用户确认。
