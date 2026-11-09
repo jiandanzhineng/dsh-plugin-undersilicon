@@ -149,7 +149,7 @@
 ## 未完成/风险
 
 - Tako key 401，真实模型 tool-call 未验证；headless 验证用本地 mock model（45 tools 可见）。
-- 需要客户端版本包含 `/api/agent-control`（1.0.42-beta 系列及以后）；旧客户端会被拒绝控制并提示升级。
+- 需要客户端版本包含 `/api/agent-control`（尚未发版，见 control-panel PR #12）；旧客户端会被拒绝控制并提示升级。
 - A 侧真实后端（虚拟设备）攻击复测已在纯后端 5340 完成，结果见 `tmp/attack/retest.md`（tmp 不入库）。
 - `script_list/script_logs/script_stop/events_unsubscribe` 的 owner 校验在 manager/tool 层；面板 RPC 仍可跨会话查看/停止（这是面板的预期权限）。
 - 侧栏面板 bundle 尚未在真实 dsh web/Electron 客户端里做 UI E2E；设置卡行为需实机确认。
