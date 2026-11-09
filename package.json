@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-undersilicon",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DeepSeek Harness plugin for the 硅基之下控制中心 (control-panel) PC client: inspect and control devices, the client UI, games, scripts and event subscriptions.",
   "icon": "./icon.svg",
   "repository": {
@@ -50,6 +50,10 @@
     "dsh": "^0.2.1-rc.3"
   },
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
     "@deepseek-ai/dsh-tools": "^0.2.1-rc.3",
