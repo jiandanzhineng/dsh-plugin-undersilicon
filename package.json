@@ -2,6 +2,11 @@
   "name": "dsh-plugin-undersilicon",
   "version": "0.1.0",
   "description": "DeepSeek Harness plugin for the 硅基之下控制中心 (control-panel) PC client: inspect and control devices, the client UI, games, scripts and event subscriptions.",
+  "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiandanzhineng/dsh-plugin-undersilicon.git"
+  },
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -10,6 +15,10 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-connection",
@@ -26,6 +35,8 @@
     "index.js",
     "src/",
     "client/",
+    "cordis.patch.yml",
+    "icon.svg",
     "README.md",
     "LICENSE"
   ],
@@ -33,12 +44,13 @@
     "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "dsh": "^0.2.1-rc.3"
   },
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.3",
     "@deepseek-ai/schemastery": "~3.18.5"
   },
   "devDependencies": {

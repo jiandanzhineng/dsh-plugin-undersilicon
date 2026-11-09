@@ -1,0 +1,7 @@
+# Bundle patch applied when this package is installed as a dsh bundle.
+# A user patch cannot add rows by id, so new plugins must use `- insert:`.
+# No config here: the plugin's Config schema defaults apply (baseUrl points at
+# the local 硅基之下控制中心 backend on http://127.0.0.1:5278/api).
+- insert:
+    - id: undersilicon
+      name: dsh-plugin-undersilicon

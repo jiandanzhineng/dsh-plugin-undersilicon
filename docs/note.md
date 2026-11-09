@@ -64,9 +64,31 @@
 - `mock/server.js`：进程内 mock 后端，支持 `mode` 与 `clientAvailable`，含设备、能力范围、
   远程过滤/423、typed hello SSE、routes titleKey、launch 返回结构、请求日志。
 
-## us-test profile（独立桌面运行时）
+## 打包与安装（bundle）
+
+- `package.json`：`dsh.manifestVersion: 1`、`dsh.bundle.patch: ./cordis.patch.yml`、`dsh.client`、
+  根 `icon: ./icon.svg`、`repository` 指向 `https://github.com/jiandanzhineng/dsh-plugin-undersilicon`。
+  `files` 只列 index/src/client/patch/icon/README/LICENSE；`npm pack` 共 36 个文件，不含 tmp/test/docs/mock。
+- `cordis.patch.yml` 用 `- insert:` 插入 `undersilicon` 行，不带 `config`（用 schema 默认值，
+  `baseUrl=http://127.0.0.1:5278/api`）。安装器（插件页 / `dsh plugin add`）会把它加入 profile 的
+  `dsh.profile.bundles` 并应用 patch，无需手改。
+- `engines.dsh: ^0.2.1-rc.3`。兼容性判定在 dsh-app-boot：声明 `engines.dsh` 时它单独决定，
+  **peerDependencies 不参与检查**；范围用 `semver.satisfies(..., {includePrerelease:true})`。
+  dsh 0.2.1-rc.3 自带 cordis 4.0.5、schemastery 3.18.5、dsh-tools 0.2.1-rc.3，与
+  `~4.0.5` / `~3.18.5` / `^0.2.1-rc.3` 相符。pnpm 会报 peers missing（profile 不自带 @deepseek-ai
+  包，运行时由 dsh 模块回退提供），不影响安装或加载。
+- 安装：插件页填 `dsh-plugin-undersilicon` 或 `github:jiandanzhineng/dsh-plugin-undersilicon`；
+  CLI `dsh plugin --profile <name> add dsh-plugin-undersilicon`（`.tgz`/目录亦可）。
+- 已用全新 profile `us-install` 验证：`dsh plugin --profile us-install add <tgz 绝对路径>` 成功，
+  pnpm 11.28.5 未出现跨盘 `file:` bug；package.json 的 bundles 含本包，`--dump-config` 有
+  `undersilicon` 行；`dsh --profile us-install --no-open --port 5399` 启动无报错，首页 boot 列表含
+  `dsh-plugin-undersilicon/client.js`。注意自定义 profile 不能再写位置参数 `web`
+  （`dsh --profile us-install web ...` 会报 too many arguments）。
+
+## us-test profile（独立桌面运行时，开发用）
 
 位置：`C:\Users\46907\.dsh\profiles\us-test`。只动这个 profile，不要动用户 desktop/web/headless。
+以下是**源码目录安装**（开发热改）方式；正式安装用上面的 bundle。
 
 - `package.json` 依赖：`"dsh-plugin-undersilicon": "file:./plugin-src"`；`plugin-src` 是指向
   `E:\smart\project\dsh-undersilicon` 的目录 junction（`mklink /J`）。pnpm 10 on Windows 无法
@@ -94,7 +116,7 @@
 
 ## 测试
 
-- `npm test` → `node --test --test-concurrency=1 test/*.test.js`，当前 101 项全过。
+- `npm test` → `node --test --test-concurrency=1 test/*.test.js`，当前 102 项全过。
 - 单测覆盖：缩放与上下限、严格数字/未知字段、路径规范化与写白名单、预置操作翻译、
   游戏参数缩放、面板锁存/恢复、急停 epoch 与重试、看门狗、沙箱逃逸与权限模型拒绝、RPC、
   并发/内存/卡死限制、订阅节流/通知限速、设置优先级与面板写入、SDK、tool 集成。

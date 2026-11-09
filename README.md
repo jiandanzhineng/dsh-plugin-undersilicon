@@ -25,7 +25,42 @@ A dsh plugin that lets an agent inspect and control the local
 
 ## 安装 / Install
 
-作为 dsh profile 的本地依赖安装（不要发布 npm）：
+要求：dsh `0.2.1-rc.3` 及以上；本机运行「硅基之下控制中心」PC 客户端，版本需包含
+`agent-control`（1.0.42-beta 系列及以后），否则插件会拒绝控制并提示升级。
+
+### 从插件页安装（推荐）
+
+1. 打开 dsh 侧栏「插件」页，点「安装」。
+2. 填入下面任一来源，确认安装：
+   - npm：`dsh-plugin-undersilicon`
+   - GitHub：`github:jiandanzhineng/dsh-plugin-undersilicon`
+3. 安装完成后组合包默认启用；重启 dsh（或启用 HMR 时等待重载）即生效。
+
+### 从命令行安装
+
+```bash
+dsh plugin --profile <profile> add dsh-plugin-undersilicon
+# 或
+dsh plugin --profile <profile> add github:jiandanzhineng/dsh-plugin-undersilicon
+```
+
+也接受 `.tgz` 或本地目录路径。安装器会做 `engines.dsh` 兼容性检查，不满足时会在
+下载前（tarball 在安装后回滚）报 `incompatible-version`。
+
+本包声明了 `dsh.bundle.patch = ./cordis.patch.yml`，安装时自动向 profile 插入
+`undersilicon` 行并加入 `dsh.profile.bundles`；patch 不带 `config`，使用插件 schema 默认值
+（`baseUrl: http://127.0.0.1:5278/api`），无需手工改 patch。
+
+### 安装后
+
+- 右侧栏出现「硅基之下」面板：设备卡（强度条 + 阈值区）、急停按钮、事件流状态。
+- 阈值与运行设置：右侧栏面板 →「设置」，可改全局/按能力阈值、`stopOnSessionEnd`、
+  脚本持久化、看门狗 TTL；保存立即生效并写入 `~/.dsh/undersilicon/settings.json`。
+- 需要控制中心客户端在运行；默认连接本机 `http://127.0.0.1:5278/api`。
+
+### 源码 / 本地开发安装
+
+不发布时，可把仓库作为目录依赖装进 profile：
 
 ```json
 {
@@ -35,26 +70,17 @@ A dsh plugin that lets an agent inspect and control the local
 }
 ```
 
-> Windows 上 pnpm 10 无法解析跨盘的 `file:E:/...`（会拼成 profile 下的相对路径），`file:///`
-> 同样失败。做法：在 profile 内 `mklink /J plugin-src E:\smart\project\dsh-undersilicon`，
-> 再用相对 `file:./plugin-src`。目录依赖安装为复制件，改插件源码后重跑 `pnpm install`。
+> Windows 上 pnpm 10/11 无法解析跨盘的 `file:E:/...`（会拼成 profile 下的相对路径），
+> `file:///` 同样失败。做法：在 profile 内 `mklink /J plugin-src E:\smart\project\dsh-undersilicon`，
+> 再用相对 `file:./plugin-src`。目录依赖安装为复制件，改插件源码后要重跑 `pnpm install`。
 > 其它平台直接写仓库路径即可。
 
-在 profile 的 `cordis.patch.yml` 增加（用户 patch 不能按 id 新增，必须 `insert`）：
+手工在 profile 的 `cordis.patch.yml` 增加（用户 patch 不能按 id 新增，必须 `insert`）：
 
 ```yaml
 - insert:
     - id: undersilicon
       name: dsh-plugin-undersilicon
-      config:
-        baseUrl: http://127.0.0.1:5278/api
-        limits:
-          default: 60
-          capabilities:
-            shock: 30
-        stopOnSessionEnd: true
-        scripts:
-          allowPersist: false
 ```
 
 启动：`dsh --profile <name>`。独立测试 profile 与验证命令见 `docs/note.md`。
@@ -191,7 +217,7 @@ npm install
 npm test
 ```
 
-`node:test` 101 项：缩放/边界（含 motors 通道与非数字值）、路径规范化与读/写白名单、预置操作
+`node:test` 102 项：缩放/边界（含 motors 通道与非数字值）、路径规范化与读/写白名单、预置操作
 原子翻译与补偿停止、游戏参数缩放、面板锁存与恢复、急停 epoch/重试与完整 hooks、看门狗与
 agent 租约（428 重试/设置推送/旧客户端拒绝/会话释放）、每会话沙箱隔离与子进程上限、
 沙箱网络全局移除、RPC、并发/内存/卡死、订阅节流/配额/会话隔离、设置优先级与面板写入、
